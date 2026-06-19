@@ -42,7 +42,7 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("### Calculations")
     st.page_link("app.py", label="Home")
-    st.page_link("pages/1_Dust_Vent_NFPA68.py", label="Dust Vent — NFPA 68 Ch.8")
+    st.page_link("pages/1_Dust_Vent_NFPA68.py", label="💨 Dust Vent — NFPA 68 Ch.8")
     st.page_link("pages/2_Enclosure_Builder.py", label="📐 Enclosure Builder")
     st.markdown("---")
     st.markdown("### Load Previous Run")

@@ -322,14 +322,14 @@ with left_col:
     st.subheader("Summary")
 
     m1, m2, m3 = st.columns(3)
-    m1.metric("Total Volume V",       f"{V_disp:.3f} {u3}")
-    m2.metric("Total Height L",       f"{L_disp:.3f} {u_lbl}")
-    m3.metric("Equiv. Diameter D_eq", f"{D_eq_disp:.3f} {u_lbl}",
+    m1.metric("Total Volume V",       f"{V_disp:.2f} {u3}")
+    m2.metric("Total Height L",       f"{L_disp:.2f} {u_lbl}")
+    m3.metric("Equiv. Diameter D_eq", f"{D_eq_disp:.2f} {u_lbl}",
               help="2√(V / πL) — diameter of a cylinder with same V and L")
     if unit != "m":
-        m1.caption(f"{V_si:.4f} m³")
-        m2.caption(f"{L_si:.3f} m")
-        m3.caption(f"{D_eq_si:.3f} m")
+        m1.caption(f"{V_si:.2f} m³")
+        m2.caption(f"{L_si:.2f} m")
+        m3.caption(f"{D_eq_si:.2f} m")
 
     st.markdown("---")
     st.markdown("**L/D Calculation**")
@@ -343,7 +343,7 @@ with left_col:
         min_value=mpos,
         value=round(D_eq_disp, 3) if D_eq_disp > 0 else round(1.0 / factor, 3),
         step=step,
-        format="%.3f",
+        format="%.2f",
         key="eb_D_override",
     )
     D_override_si = D_override_disp * factor
