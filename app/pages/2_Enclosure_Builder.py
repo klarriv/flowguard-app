@@ -182,11 +182,11 @@ st.caption("Compose an enclosure from stacked geometry segments · compute V and
 
 # ── Unit selector ─────────────────────────────────────────────────────────────
 _prev_unit = st.session_state.get("eb_unit", "m")
-uc1, uc2 = st.columns([1, 4])
-unit = uc1.selectbox(
+unit = st.radio(
     "Input unit",
     ["m", "ft", "in"],
     index=["m", "ft", "in"].index(_prev_unit),
+    horizontal=True,
 )
 
 if unit != _prev_unit:
@@ -322,13 +322,14 @@ with left_col:
     st.subheader("Summary")
 
     m1, m2, m3 = st.columns(3)
-    m1.metric("Total Volume V",
-              f"{V_disp:.3f} {u3} ({V_si:.4f} m³)")
-    m2.metric("Total Height L",
-              f"{L_disp:.3f} {u_lbl} ({L_si:.3f} m)")
-    m3.metric("Equiv. Diameter D_eq",
-              f"{D_eq_disp:.3f} {u_lbl} ({D_eq_si:.3f} m)",
+    m1.metric("Total Volume V",       f"{V_disp:.3f} {u3}")
+    m2.metric("Total Height L",       f"{L_disp:.3f} {u_lbl}")
+    m3.metric("Equiv. Diameter D_eq", f"{D_eq_disp:.3f} {u_lbl}",
               help="2√(V / πL) — diameter of a cylinder with same V and L")
+    if unit != "m":
+        m1.caption(f"{V_si:.4f} m³")
+        m2.caption(f"{L_si:.3f} m")
+        m3.caption(f"{D_eq_si:.3f} m")
 
     st.markdown("---")
     st.markdown("**L/D Calculation**")
