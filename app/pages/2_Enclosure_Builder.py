@@ -77,9 +77,11 @@ def _mesh_box(ax: float, bx: float, ax2: float, bx2: float, h: float, z0: float)
 def _build_3d_figure(seg_params: list[dict]) -> go.Figure:
     """Build a Plotly 3D figure from a list of segment parameter dicts."""
     traces = []
-    z_base = 0.0
+    # Segment 1 is the topmost; stack downward so z=0 is the bottom outlet.
+    z_base = sum(seg["h"] for seg in seg_params)
 
     for idx, seg in enumerate(seg_params):
+        z_base -= seg["h"]
         color = _SEG_COLORS[idx % len(_SEG_COLORS)]
         stype = seg["type"]
         h     = seg["h"]
@@ -94,7 +96,6 @@ def _build_3d_figure(seg_params: list[dict]) -> go.Figure:
         elif stype == "truncated_rect_pyramid":
             args = _mesh_box(seg["A"], seg["B"], seg["a"], seg["b"], h, z_base)
         else:
-            z_base += h
             continue
 
         xv, yv, zv, iv, jv, kv = args
@@ -111,7 +112,6 @@ def _build_3d_figure(seg_params: list[dict]) -> go.Figure:
                 f"V = {seg['vol']:.4f} m³<extra></extra>"
             ),
         ))
-        z_base += h
 
     if not traces:
         return go.Figure()
@@ -120,11 +120,11 @@ def _build_3d_figure(seg_params: list[dict]) -> go.Figure:
     fig.update_layout(
         scene=dict(
             aspectmode="data",
-            xaxis=dict(title="x [m]", showbackground=True,
+            xaxis=dict(title="", showticklabels=False, showbackground=True,
                        backgroundcolor="rgba(240,240,240,0.5)"),
-            yaxis=dict(title="y [m]", showbackground=True,
+            yaxis=dict(title="", showticklabels=False, showbackground=True,
                        backgroundcolor="rgba(240,240,240,0.5)"),
-            zaxis=dict(title="z [m]", showbackground=True,
+            zaxis=dict(title="", showticklabels=False, showbackground=True,
                        backgroundcolor="rgba(230,230,230,0.5)"),
             camera=dict(
                 up=dict(x=0, y=0, z=1),
