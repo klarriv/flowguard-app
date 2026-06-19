@@ -1,0 +1,3 @@
+git+https://github.com/klarriv/flowguard.git
+streamlit
+weasyprint
