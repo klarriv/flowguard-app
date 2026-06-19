@@ -19,6 +19,12 @@ from explosion_protection.nfpa_68_ch8_dust_vent import (
 
 from utils.serializer import inputs_to_dict, result_to_dict, build_run_payload
 
+
+@st.cache_data(show_spinner=False)
+def _make_pdf(payload_json: str, logo_path_str: str | None) -> bytes:
+    from components.report import generate_pdf_bytes
+    return generate_pdf_bytes(json.loads(payload_json), logo_path=logo_path_str)
+
 LOGO_PATH = str(Path(__file__).parent.parent / "assets" / "logo_capt-air.jpg")
 
 st.set_page_config(
@@ -37,6 +43,7 @@ with st.sidebar:
     st.markdown("### Calculations")
     st.page_link("app.py", label="Home")
     st.page_link("pages/1_Dust_Vent_NFPA68.py", label="Dust Vent — NFPA 68 Ch.8")
+    st.page_link("pages/2_Enclosure_Builder.py", label="📐 Enclosure Builder")
     st.markdown("---")
     st.markdown("### Load Previous Run")
     uploaded = st.file_uploader("Upload a saved JSON file", type=["json"], label_visibility="collapsed")
@@ -50,8 +57,9 @@ with st.sidebar:
     st.markdown("---")
     st.page_link("app.py", label="← Home")
 
-# ── Pre-fill from loaded run ───────────────────────────────────────────────────
+# ── Pre-fill from loaded run or Enclosure Builder ─────────────────────────────
 loaded = st.session_state.pop("loaded_run", None)
+_eb    = st.session_state.pop("eb_to_nfpa68", None)
 
 def _pre(key: str, default):
     if loaded is None:
@@ -129,6 +137,8 @@ st.caption("NFPA 68 (2023) · Chapter 8 · §8.2 – §8.5")
 
 if loaded:
     st.success(f"Loaded: **{loaded.get('meta', {}).get('label', '—')}** — form pre-filled.")
+if _eb:
+    st.success(f"Enclosure Builder → V = **{_eb['V']:.4f} m³**, L/D = **{_eb['LD']:.2f}** pre-filled.")
 
 st.markdown("---")
 
@@ -162,13 +172,14 @@ with r1_left:
     lc, ic = st.columns([1, 1], gap="small")
     _label(lc, "Volume V [m³]")
     V = ic.number_input("Volume V [m³]", label_visibility="collapsed",
-                        value=float(_pre("enclosure.V", 25.0)), min_value=0.01, step=0.5, format="%.2f")
+                        value=float(_eb["V"] if _eb else _pre("enclosure.V", 25.0)),
+                        min_value=0.01, step=0.5, format="%.2f")
 
     lc, ic = st.columns([1, 1], gap="small")
     _label(lc, "L/D ratio [—]")
     LD = ic.number_input("L/D ratio [—]", label_visibility="collapsed",
-                         value=float(_pre("enclosure.LD", 1.0)), min_value=1.0, max_value=6.0,
-                         step=0.1, format="%.2f")
+                         value=float(min(_eb["LD"], 6.0) if _eb else _pre("enclosure.LD", 1.0)),
+                         min_value=1.0, max_value=6.0, step=0.1, format="%.2f")
 
     lc, ic = st.columns([1, 1], gap="small")
     _label(lc, "Solid volume [m³]", "Volume of solid objects inside (§8.4.1)")
@@ -554,43 +565,54 @@ if run_calc or "last_result" in st.session_state:
 
     # ── Report / Export ───────────────────────────────────────────────────────
     st.markdown("---")
-    with st.expander("📋 Report / Export", expanded=False):
-        r1, r2 = st.columns(2)
-        calc_label = r1.text_input("Calculation label", value=_pre_meta("label"), placeholder="e.g. Silo-01")
-        engineer   = r2.text_input("Engineer",          value=_pre_meta("engineer"), placeholder="Name")
+    st.markdown("### 📋 Report / Export")
 
-        enc_o, dust_o, vent_o, duct_o, tm, ti, pv, sm, ff, cv = st.session_state["last_inputs"]
-        inp_dict = inputs_to_dict(enc_o, dust_o, vent_o, duct_o, tm, ti, pv, sm, ff, cv)
-        out_dict = result_to_dict(result)
-        payload  = build_run_payload("", calc_label, engineer, inp_dict, out_dict)
+    rc0, rc1, rc2 = st.columns(3)
+    project_num = rc0.text_input("Project number", value=_pre_meta("project"), placeholder="e.g. J-1234")
+    calc_label  = rc1.text_input("Calculation label", value=_pre_meta("label"), placeholder="e.g. DLMC 4/8/15")
+    engineer    = rc2.text_input("Engineer", value=_pre_meta("engineer"), placeholder="Name")
 
-        e1, e2 = st.columns(2)
+    enc_o, dust_o, vent_o, duct_o, tm, ti, pv, sm, ff, cv = st.session_state["last_inputs"]
+    inp_dict = inputs_to_dict(enc_o, dust_o, vent_o, duct_o, tm, ti, pv, sm, ff, cv)
+    out_dict = result_to_dict(result)
+    payload  = build_run_payload(project_num, calc_label, engineer, inp_dict, out_dict)
 
-        with e1:
-            json_bytes = json.dumps(payload, indent=2).encode()
-            filename   = f"{calc_label.replace(' ', '_') or 'calculation'}.json"
+    e1, e2 = st.columns(2)
+
+    with e1:
+        json_bytes = json.dumps(payload, indent=2).encode()
+        filename   = f"{calc_label.replace(' ', '_') or 'calculation'}.json"
+        st.download_button(
+            label="⬇ Download JSON",
+            data=json_bytes,
+            file_name=filename,
+            mime="application/json",
+            use_container_width=True,
+        )
+
+    with e2:
+        from components.report import WEASYPRINT_OK
+        if not WEASYPRINT_OK:
+            st.error("WeasyPrint not installed. Run: pip install weasyprint")
+        else:
+            fields_ok = bool(project_num and calc_label and engineer)
+            logo      = LOGO_PATH if Path(LOGO_PATH).exists() else None
+            pdf_bytes = _make_pdf(json.dumps(payload), logo) if fields_ok else b""
+            pdf_name  = f"{calc_label.replace(' ', '_') or 'calculation'}.pdf"
             st.download_button(
-                label="⬇ Download JSON",
-                data=json_bytes,
-                file_name=filename,
-                mime="application/json",
+                label="⬇ Download PDF",
+                data=pdf_bytes,
+                file_name=pdf_name,
+                mime="application/pdf",
                 use_container_width=True,
+                disabled=not fields_ok,
             )
-
-        with e2:
-            if st.button("📄 Generate & Download PDF", use_container_width=True):
-                from components.report import generate_pdf_bytes, WEASYPRINT_OK
-                if not WEASYPRINT_OK:
-                    st.error("WeasyPrint not installed. Run: pip install weasyprint")
-                else:
-                    logo = LOGO_PATH if Path(LOGO_PATH).exists() else None
-                    with st.spinner("Generating PDF…"):
-                        pdf_bytes = generate_pdf_bytes(payload, logo_path=logo)
-                    pdf_name = f"{calc_label.replace(' ', '_') or 'calculation'}.pdf"
-                    st.download_button(
-                        label="⬇ Download PDF",
-                        data=pdf_bytes,
-                        file_name=pdf_name,
-                        mime="application/pdf",
-                        use_container_width=True,
-                    )
+            if not fields_ok:
+                missing = [
+                    name for name, val in [
+                        ("Project number", project_num),
+                        ("Calculation label", calc_label),
+                        ("Engineer", engineer),
+                    ] if not val
+                ]
+                st.caption(f"Required to download PDF: {', '.join(missing)}")
