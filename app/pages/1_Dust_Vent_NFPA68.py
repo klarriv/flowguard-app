@@ -295,6 +295,27 @@ st.markdown("---")
 st.subheader("Enclosure Geometry")
 st.caption("Define the protected enclosure's volume and L/D ratio")
 
+st.markdown("""
+<style>
+.st-key-reset_all_btn button {
+    background-color: #C8392B;
+    border-color: #C8392B;
+    color: #fff;
+}
+.st-key-reset_all_btn button:hover {
+    background-color: #a52d21;
+    border-color: #a52d21;
+    color: #fff;
+}
+</style>
+""", unsafe_allow_html=True)
+reset_col, _ = st.columns([1, 4])
+if reset_col.button("🔄 Reset All", key="reset_all_btn", use_container_width=True):
+    for k in list(st.session_state.keys()):
+        if k.startswith("eb_") or k.startswith("eg_"):
+            del st.session_state[k]
+    st.rerun()
+
 GEOM_MODES = ["Circular Enclosure", "Rectangular Enclosure", "Donaldson", "Custom", "Manual Input"]
 _prev_geom_mode = st.session_state.get("eg_mode", "Manual Input")
 geom_mode = st.selectbox(
@@ -371,8 +392,6 @@ else:
         for k, v in list(st.session_state.items()):
             if isinstance(v, float) and any(k.startswith(p) for p in _DIM_PREFIXES):
                 st.session_state[k] = v * ratio
-        if isinstance(st.session_state.get("eb_D_override"), float):
-            st.session_state["eb_D_override"] *= ratio
         st.session_state["eb_unit"] = unit
         st.rerun()
 
@@ -494,16 +513,7 @@ else:
                 "Multiple vents at different elevations along the same axis (§6.4.3.2.2) "
                 "aren't supported — model each section separately if that applies."
             )
-            D_override_disp = st.number_input(
-                f"Override Dhe [{u_lbl}]",
-                min_value=mpos,
-                value=round(Dhe_disp, 3) if Dhe_disp > 0 else round(1.0 / factor, 3),
-                step=step,
-                format="%.2f",
-                key="eb_D_override",
-            )
-            D_override_si = D_override_disp * factor
-            ld_final = ch6_ld_ratio(L_si, D_override_si)
+            ld_final = ch6_ld_ratio(L_si, Dhe_si)
             st.metric("L/D", f"{ld_final:.2f}")
 
             if ld_final > 6.0:
