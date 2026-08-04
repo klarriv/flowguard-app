@@ -14,12 +14,14 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from core.geometry import (
-    segment_volume, enclosure_volume_and_length, equivalent_diameter, ld_ratio,
+    segment_volume, enclosure_volume_and_length, enclosure_hydraulic_diameter,
+    largest_cross_section,
 )
 from core.enclosure_catalog import (
     circular_enclosure_default, rectangular_enclosure_default,
     list_families, list_models, get_model,
 )
+from explosion_protection.nfpa_68_ch6_equations import ld_ratio as ch6_ld_ratio
 from explosion_protection.nfpa_68_ch8_dust_vent import (
     Enclosure, Dust, Vent, Duct, TurbulenceInputs, PartialVolumeInputs,
     TurbulenceMode, SubatmosphericMethod,
@@ -156,11 +158,16 @@ def _build_3d_figure(seg_params: list[dict]) -> go.Figure:
 
 def _seed_segments(segments: list[dict]) -> None:
     """Reset the Enclosure Geometry segment builder to a given list of segment dicts (SI)."""
+    old_len = len(st.session_state.get("eb_seg_types", []))
     st.session_state.eb_seg_types = [s["type"] for s in segments]
     for i, seg in enumerate(segments):
+        st.session_state[f"eb_type_sel_{i}"] = SHAPES[seg["type"]]
         for k, v in seg.items():
             if k != "type":
                 st.session_state[f"eb_{k}_{i}"] = float(v)
+    for i in range(len(segments), old_len):
+        for suffix in ("a", "b", "h", "r", "R", "A", "B", "type_sel"):
+            st.session_state.pop(f"eb_{suffix}_{i}", None)
 
 
 @st.cache_data(show_spinner=False)
@@ -454,37 +461,49 @@ else:
         st.info("Add at least one segment above to compute volume and L/D.")
         V, LD = 0.01, 1.0
     else:
-        V_si, L_si = enclosure_volume_and_length(seg_params)
-        D_eq_si    = equivalent_diameter(V_si, L_si)
-        V_disp, L_disp, D_eq_disp = V_si / factor**3, L_si / factor, D_eq_si / factor
+        V_si, L_si   = enclosure_volume_and_length(seg_params)
+        Dhe_si       = enclosure_hydraulic_diameter(seg_params, V_si, L_si)
+        family, R    = largest_cross_section(seg_params)
+        V_disp, L_disp, Dhe_disp = V_si / factor**3, L_si / factor, Dhe_si / factor
+
+        if family == "circular":
+            shape_help = "Circular cross section (§6.4.3.6.1)."
+        elif R < 1.2:
+            shape_help = f"Square cross section, R={R:.2f} (§6.4.3.6.2)."
+        else:
+            shape_help = f"Rectangular cross section, R={R:.2f} (§6.4.3.6.3)."
 
         geom_left, geom_right = st.columns([1, 1], gap="large")
 
         with geom_left:
             m1, m2, m3 = st.columns(3)
-            m1.metric("Total Volume V",       f"{V_disp:.2f} {u3}")
-            m2.metric("Total Height L",       f"{L_disp:.2f} {u_lbl}")
-            m3.metric("Equiv. Diameter D_eq", f"{D_eq_disp:.2f} {u_lbl}",
-                      help="2√(V / πL) — diameter of a cylinder with same V and L")
+            m1.metric("Total Volume V",         f"{V_disp:.2f} {u3}")
+            m2.metric("Total Height L",         f"{L_disp:.2f} {u_lbl}")
+            m3.metric("Hydraulic Diameter Dhe", f"{Dhe_disp:.2f} {u_lbl}",
+                      help=f"NFPA 68 §6.4.3.6 — {shape_help}")
             if unit != "m":
                 m1.caption(f"{V_si:.2f} m³")
                 m2.caption(f"{L_si:.2f} m")
-                m3.caption(f"{D_eq_si:.2f} m")
+                m3.caption(f"{Dhe_si:.2f} m")
+            st.caption(shape_help)
 
             st.caption(
-                "D_eq assumes a circular cross-section. "
-                "Override with the actual characteristic diameter for rectangular enclosures."
+                "V and L should already represent Veff and H (§6.4.3.2/.3) — build the "
+                "segment stack to end at the vent, not necessarily the physical extent "
+                "of the enclosure, or conservatively use the whole enclosure (§6.4.3.4). "
+                "Multiple vents at different elevations along the same axis (§6.4.3.2.2) "
+                "aren't supported — model each section separately if that applies."
             )
             D_override_disp = st.number_input(
-                f"Override D [{u_lbl}]",
+                f"Override Dhe [{u_lbl}]",
                 min_value=mpos,
-                value=round(D_eq_disp, 3) if D_eq_disp > 0 else round(1.0 / factor, 3),
+                value=round(Dhe_disp, 3) if Dhe_disp > 0 else round(1.0 / factor, 3),
                 step=step,
                 format="%.2f",
                 key="eb_D_override",
             )
             D_override_si = D_override_disp * factor
-            ld_final = ld_ratio(L_si, D_override_si)
+            ld_final = ch6_ld_ratio(L_si, D_override_si)
             st.metric("L/D", f"{ld_final:.2f}")
 
             if ld_final > 6.0:
