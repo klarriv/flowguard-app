@@ -24,7 +24,6 @@ with st.sidebar:
     st.markdown("### Calculations")
     st.page_link("app.py", label="Home")
     st.page_link("pages/1_Dust_Vent_NFPA68.py", label="💨 Dust Vent — NFPA 68 Ch.8")
-    st.page_link("pages/2_Enclosure_Builder.py", label="📐 Enclosure Builder")
     st.markdown("---")
     st.caption("NFPA 68 (2023) · Internal use only")
 
@@ -34,4 +33,3 @@ st.markdown("Select a calculation from the sidebar to begin.")
 st.markdown("---")
 st.markdown("#### Available calculations")
 st.page_link("pages/1_Dust_Vent_NFPA68.py", label="💨 Dust Deflagration Vent Sizing — NFPA 68 (2023) Ch.8")
-st.page_link("pages/2_Enclosure_Builder.py", label="📐 Enclosure Builder — Compose geometry stacks, compute V and L/D")

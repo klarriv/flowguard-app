@@ -6,10 +6,20 @@ NFPA 68 (2023) Chapter 8 — Deflagration Vent Sizing for Dusts.
 
 import base64
 import json
+import math
 from pathlib import Path
 
+import numpy as np
+import plotly.graph_objects as go
 import streamlit as st
 
+from core.geometry import (
+    segment_volume, enclosure_volume_and_length, equivalent_diameter, ld_ratio,
+)
+from core.enclosure_catalog import (
+    circular_enclosure_default, rectangular_enclosure_default,
+    list_families, list_models, get_model,
+)
 from explosion_protection.nfpa_68_ch8_dust_vent import (
     Enclosure, Dust, Vent, Duct, TurbulenceInputs, PartialVolumeInputs,
     TurbulenceMode, SubatmosphericMethod,
@@ -18,6 +28,139 @@ from explosion_protection.nfpa_68_ch8_dust_vent import (
 )
 
 from utils.serializer import inputs_to_dict, result_to_dict, build_run_payload
+
+# ── Enclosure Geometry — unit conversion (display-only; math lives in flowguard) ─
+UNIT_TO_M     = {"m": 1.0,   "ft": 0.3048, "in": 0.0254}
+UNIT_STEP     = {"m": 0.05,  "ft": 0.1,    "in": 0.5}
+UNIT_MIN_POS  = {"m": 0.001, "ft": 0.003,  "in": 0.04}
+_DIM_PREFIXES = ("eb_a_", "eb_b_", "eb_h_", "eb_r_", "eb_R_", "eb_A_", "eb_B_")
+
+_SEG_COLORS = [
+    "#4C78A8", "#F58518", "#54A24B", "#E45756",
+    "#72B7B2", "#FF9DA7", "#9D755D", "#BAB0AC",
+]
+
+SHAPES = {
+    "cuboid":                 "Rectangular Box",
+    "cylinder":               "Cylinder",
+    "truncated_cone":         "Truncated Cone (Conical Hopper)",
+    "truncated_rect_pyramid": "Truncated Rectangular Pyramid (Hopper)",
+}
+SHAPE_LABELS = {v: k for k, v in SHAPES.items()}
+
+
+def _mesh_frustum(R: float, r: float, h: float, z0: float, N: int = 60):
+    """
+    Triangulated solid mesh for a circular frustum (truncated cone).
+    R = bottom radius, r = top radius. All args in metres.
+    Returns (x, y, z, i, j, k) for go.Mesh3d.
+    """
+    theta = np.linspace(0, 2 * math.pi, N, endpoint=False)
+    ct, st_ = np.cos(theta), np.sin(theta)
+
+    x = np.concatenate([R * ct, r * ct, [0.0, 0.0]])
+    y = np.concatenate([R * st_, r * st_, [0.0, 0.0]])
+    z = np.concatenate([np.full(N, z0), np.full(N, z0 + h), [z0, z0 + h]])
+
+    ii, jj, kk = [], [], []
+    for idx in range(N):
+        nxt = (idx + 1) % N
+        ii += [idx,     idx     ]; jj += [nxt,     N + nxt]; kk += [N + nxt, N + idx]
+        ii += [2 * N  ]; jj += [nxt      ]; kk += [idx      ]
+        ii += [2*N + 1]; jj += [N + idx  ]; kk += [N + nxt  ]
+
+    return x.tolist(), y.tolist(), z.tolist(), ii, jj, kk
+
+
+def _mesh_box(ax: float, bx: float, ax2: float, bx2: float, h: float, z0: float):
+    """
+    Triangulated solid mesh for a rectangular frustum. All args in metres.
+    Bottom base ax × bx, top base ax2 × bx2, both centred at origin.
+    Returns (x, y, z, i, j, k) for go.Mesh3d.
+    """
+    ha, hb   = ax  / 2, bx  / 2
+    ha2, hb2 = ax2 / 2, bx2 / 2
+
+    x = [-ha,  ha,  ha, -ha, -ha2,  ha2,  ha2, -ha2]
+    y = [-hb, -hb,  hb,  hb, -hb2, -hb2,  hb2,  hb2]
+    z = [z0]*4 + [z0 + h]*4
+
+    ii = [0, 0,  4, 4,  0, 0,  2, 2,  0, 0,  1, 1]
+    jj = [3, 2,  5, 6,  1, 5,  3, 7,  4, 7,  2, 6]
+    kk = [2, 1,  6, 7,  5, 4,  7, 6,  7, 3,  6, 5]
+
+    return x, y, z, ii, jj, kk
+
+
+def _build_3d_figure(seg_params: list[dict]) -> go.Figure:
+    """Build a Plotly 3D figure. seg_params dicts carry SI values."""
+    traces = []
+    z_base = sum(seg["h"] for seg in seg_params)   # top of the stack
+
+    for idx, seg in enumerate(seg_params):
+        z_base -= seg["h"]
+        color = _SEG_COLORS[idx % len(_SEG_COLORS)]
+        stype = seg["type"]
+        h     = seg["h"]
+        label = SHAPES.get(stype, stype)
+
+        if stype == "cylinder":
+            args = _mesh_frustum(seg["r"], seg["r"], h, z_base)
+        elif stype == "truncated_cone":
+            args = _mesh_frustum(seg["r"], seg["R"], h, z_base)
+        elif stype == "cuboid":
+            args = _mesh_box(seg["a"], seg["b"], seg["a"], seg["b"], h, z_base)
+        elif stype == "truncated_rect_pyramid":
+            args = _mesh_box(seg["a"], seg["b"], seg["A"], seg["B"], h, z_base)
+        else:
+            continue
+
+        xv, yv, zv, iv, jv, kv = args
+        traces.append(go.Mesh3d(
+            x=xv, y=yv, z=zv,
+            i=iv, j=jv, k=kv,
+            color=color,
+            opacity=0.88,
+            flatshading=True,
+            name=f"Seg {idx + 1} — {label}",
+            showlegend=True,
+            hovertemplate=(
+                f"<b>Segment {idx + 1}</b><br>{label}<br>"
+                f"V = {seg['vol_si']:.4f} m³<extra></extra>"
+            ),
+        ))
+
+    if not traces:
+        return go.Figure()
+
+    fig = go.Figure(data=traces)
+    fig.update_layout(
+        scene=dict(
+            aspectmode="data",
+            xaxis=dict(title="", showticklabels=False, showbackground=True,
+                       backgroundcolor="rgba(240,240,240,0.5)"),
+            yaxis=dict(title="", showticklabels=False, showbackground=True,
+                       backgroundcolor="rgba(240,240,240,0.5)"),
+            zaxis=dict(title="", showticklabels=False, showbackground=True,
+                       backgroundcolor="rgba(230,230,230,0.5)"),
+            camera=dict(up=dict(x=0, y=0, z=1), eye=dict(x=1.4, y=1.4, z=1.1)),
+        ),
+        paper_bgcolor="rgba(0,0,0,0)",
+        margin=dict(l=0, r=0, t=30, b=0),
+        legend=dict(orientation="h", yanchor="top", y=-0.02,
+                    xanchor="left", x=0, font=dict(size=11)),
+        height=520,
+    )
+    return fig
+
+
+def _seed_segments(segments: list[dict]) -> None:
+    """Reset the Enclosure Geometry segment builder to a given list of segment dicts (SI)."""
+    st.session_state.eb_seg_types = [s["type"] for s in segments]
+    for i, seg in enumerate(segments):
+        for k, v in seg.items():
+            if k != "type":
+                st.session_state[f"eb_{k}_{i}"] = float(v)
 
 
 @st.cache_data(show_spinner=False)
@@ -43,7 +186,6 @@ with st.sidebar:
     st.markdown("### Calculations")
     st.page_link("app.py", label="Home")
     st.page_link("pages/1_Dust_Vent_NFPA68.py", label="💨 Dust Vent — NFPA 68 Ch.8")
-    st.page_link("pages/2_Enclosure_Builder.py", label="📐 Enclosure Builder")
     st.markdown("---")
     st.markdown("### Load Previous Run")
     uploaded = st.file_uploader("Upload a saved JSON file", type=["json"], label_visibility="collapsed")
@@ -57,9 +199,8 @@ with st.sidebar:
     st.markdown("---")
     st.page_link("app.py", label="← Home")
 
-# ── Pre-fill from loaded run or Enclosure Builder ─────────────────────────────
+# ── Pre-fill from loaded run ───────────────────────────────────────────────────
 loaded = st.session_state.pop("loaded_run", None)
-_eb    = st.session_state.pop("eb_to_nfpa68", None)
 
 def _pre(key: str, default):
     if loaded is None:
@@ -137,8 +278,226 @@ st.caption("NFPA 68 (2023) · Chapter 8 · §8.2 – §8.5")
 
 if loaded:
     st.success(f"Loaded: **{loaded.get('meta', {}).get('label', '—')}** — form pre-filled.")
-if _eb:
-    st.success(f"Enclosure Builder → V = **{_eb['V']:.4f} m³**, L/D = **{_eb['LD']:.2f}** pre-filled.")
+
+st.markdown("---")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ENCLOSURE GEOMETRY — defines V and L/D consumed by the Enclosure section below
+# ══════════════════════════════════════════════════════════════════════════════
+
+st.subheader("Enclosure Geometry")
+st.caption("Define the protected enclosure's volume and L/D ratio")
+
+GEOM_MODES = ["Circular Enclosure", "Rectangular Enclosure", "Donaldson", "Custom", "Manual Input"]
+_prev_geom_mode = st.session_state.get("eg_mode", "Manual Input")
+geom_mode = st.selectbox(
+    "Enclosure geometry method",
+    GEOM_MODES,
+    index=GEOM_MODES.index(_prev_geom_mode) if _prev_geom_mode in GEOM_MODES else len(GEOM_MODES) - 1,
+)
+
+_reseed = geom_mode != _prev_geom_mode
+
+if geom_mode == "Donaldson":
+    families = list_families()
+    _prev_family = st.session_state.get("eg_family", families[0])
+    family = st.selectbox(
+        "Family", families,
+        index=families.index(_prev_family) if _prev_family in families else 0,
+    )
+    if family != _prev_family:
+        _reseed = True
+
+    models = list_models(family)
+    _prev_model = st.session_state.get("eg_model", models[0])
+    model_name = st.selectbox(
+        "Model", models,
+        index=models.index(_prev_model) if _prev_model in models else 0,
+    )
+    if model_name != _prev_model:
+        _reseed = True
+
+    st.session_state["eg_family"] = family
+    st.session_state["eg_model"]  = model_name
+
+    if _reseed:
+        _seed_segments(get_model(family, model_name).segments)
+
+elif geom_mode == "Circular Enclosure" and _reseed:
+    _seed_segments(circular_enclosure_default())
+elif geom_mode == "Rectangular Enclosure" and _reseed:
+    _seed_segments(rectangular_enclosure_default())
+elif geom_mode == "Custom" and _reseed:
+    st.session_state.eb_seg_types = []
+
+st.session_state["eg_mode"] = geom_mode
+
+if _reseed:
+    st.rerun()
+
+if geom_mode == "Manual Input":
+    lc, ic = st.columns([1, 1], gap="small")
+    _label(lc, "Volume V [m³]")
+    V = ic.number_input("Volume V [m³]", label_visibility="collapsed",
+                        value=float(_pre("enclosure.V", 25.0)),
+                        min_value=0.01, step=0.5, format="%.2f")
+
+    lc, ic = st.columns([1, 1], gap="small")
+    _label(lc, "L/D ratio [—]")
+    LD = ic.number_input("L/D ratio [—]", label_visibility="collapsed",
+                         value=float(_pre("enclosure.LD", 1.0)),
+                         min_value=1.0, step=0.1, format="%.2f")
+    if LD > 6.0:
+        st.warning(f"L/D = {LD:.2f} exceeds 6.0 — outside NFPA 68 §8.1.1 scope. "
+                   "Verify applicability with your engineer of record.")
+
+else:
+    if "eb_seg_types" not in st.session_state:
+        st.session_state.eb_seg_types = []
+
+    _prev_unit = st.session_state.get("eb_unit", "m")
+    unit = st.radio("Input unit", ["m", "ft", "in"],
+                     index=["m", "ft", "in"].index(_prev_unit), horizontal=True)
+
+    if unit != _prev_unit:
+        ratio = UNIT_TO_M[_prev_unit] / UNIT_TO_M[unit]
+        for k, v in list(st.session_state.items()):
+            if isinstance(v, float) and any(k.startswith(p) for p in _DIM_PREFIXES):
+                st.session_state[k] = v * ratio
+        if isinstance(st.session_state.get("eb_D_override"), float):
+            st.session_state["eb_D_override"] *= ratio
+        st.session_state["eb_unit"] = unit
+        st.rerun()
+
+    st.session_state["eb_unit"] = unit
+    factor = UNIT_TO_M[unit]
+    u_lbl  = unit
+    u3     = f"{unit}³" if unit != "in" else "in³"
+
+    seg_params: list[dict] = []
+    delete_idx = None
+    step = UNIT_STEP[unit]
+    mpos = UNIT_MIN_POS[unit]
+
+    for i, stype in enumerate(st.session_state.eb_seg_types):
+        shape_label = SHAPES.get(stype, stype)
+        with st.expander(f"**Segment {i + 1}** — {shape_label}", expanded=True):
+            top_left, top_right = st.columns([3, 1])
+
+            with top_left:
+                sel = st.selectbox(
+                    "Shape",
+                    options=list(SHAPES.values()),
+                    index=list(SHAPES.keys()).index(stype),
+                    key=f"eb_type_sel_{i}",
+                    label_visibility="collapsed",
+                )
+                new_type = SHAPE_LABELS[sel]
+                if new_type != st.session_state.eb_seg_types[i]:
+                    st.session_state.eb_seg_types[i] = new_type
+                    st.rerun()
+
+            with top_right:
+                if st.button("🗑 Delete", key=f"eb_del_{i}", use_container_width=True):
+                    delete_idx = i
+
+            params: dict = {"type": stype}
+
+            if stype == "cuboid":
+                c1, c2, c3 = st.columns(3)
+                a = c1.number_input(f"Length a [{u_lbl}]", min_value=mpos, value=st.session_state.get(f"eb_a_{i}", 1.0), step=step, format="%.3f", key=f"eb_a_{i}")
+                b = c2.number_input(f"Width b [{u_lbl}]",  min_value=mpos, value=st.session_state.get(f"eb_b_{i}", 1.0), step=step, format="%.3f", key=f"eb_b_{i}")
+                h = c3.number_input(f"Height h [{u_lbl}]", min_value=mpos, value=st.session_state.get(f"eb_h_{i}", 1.0), step=step, format="%.3f", key=f"eb_h_{i}")
+                params.update(a=a * factor, b=b * factor, h=h * factor)
+
+            elif stype == "cylinder":
+                c1, c2 = st.columns(2)
+                r = c1.number_input(f"Radius r [{u_lbl}]", min_value=mpos, value=st.session_state.get(f"eb_r_{i}", 0.5), step=step, format="%.3f", key=f"eb_r_{i}")
+                h = c2.number_input(f"Height h [{u_lbl}]", min_value=mpos, value=st.session_state.get(f"eb_h_{i}", 1.0), step=step, format="%.3f", key=f"eb_h_{i}")
+                params.update(r=r * factor, h=h * factor)
+
+            elif stype == "truncated_cone":
+                c1, c2, c3 = st.columns(3)
+                R = c1.number_input(f"Large radius R [{u_lbl}]", min_value=mpos, value=st.session_state.get(f"eb_R_{i}", 0.5), step=step, format="%.3f", key=f"eb_R_{i}")
+                r = c2.number_input(f"Small radius r [{u_lbl}]", min_value=0.0,  value=st.session_state.get(f"eb_r_{i}", 0.1), step=step, format="%.3f", key=f"eb_r_{i}")
+                h = c3.number_input(f"Height h [{u_lbl}]",        min_value=mpos, value=st.session_state.get(f"eb_h_{i}", 1.0), step=step, format="%.3f", key=f"eb_h_{i}")
+                params.update(R=R * factor, r=r * factor, h=h * factor)
+
+            elif stype == "truncated_rect_pyramid":
+                c1, c2, c3, c4, c5 = st.columns(5)
+                A = c1.number_input(f"Large A [{u_lbl}]", min_value=mpos, value=st.session_state.get(f"eb_A_{i}", 1.0), step=step, format="%.3f", key=f"eb_A_{i}")
+                B = c2.number_input(f"Large B [{u_lbl}]", min_value=mpos, value=st.session_state.get(f"eb_B_{i}", 1.0), step=step, format="%.3f", key=f"eb_B_{i}")
+                a = c3.number_input(f"Small a [{u_lbl}]", min_value=0.0,  value=st.session_state.get(f"eb_a_{i}", 0.2), step=step, format="%.3f", key=f"eb_a_{i}")
+                b = c4.number_input(f"Small b [{u_lbl}]", min_value=0.0,  value=st.session_state.get(f"eb_b_{i}", 0.2), step=step, format="%.3f", key=f"eb_b_{i}")
+                h = c5.number_input(f"Height h [{u_lbl}]", min_value=mpos, value=st.session_state.get(f"eb_h_{i}", 1.0), step=step, format="%.3f", key=f"eb_h_{i}")
+                params.update(A=A * factor, B=B * factor, a=a * factor, b=b * factor, h=h * factor)
+
+            vol_si = segment_volume(params)
+            params["vol_si"] = vol_si
+            vol_disp = vol_si / factor**3
+            st.caption(f"Segment volume: **{vol_disp:.4f} {u3}** ({vol_si:.4f} m³)")
+
+            seg_params.append(params)
+
+    if delete_idx is not None:
+        st.session_state.eb_seg_types.pop(delete_idx)
+        for suffix in ("a", "b", "h", "r", "R", "A", "B", "type_sel"):
+            st.session_state.pop(f"eb_{suffix}_{delete_idx}", None)
+        st.rerun()
+
+    col_add, _ = st.columns([1, 4])
+    if col_add.button("＋ Add segment", use_container_width=True):
+        st.session_state.eb_seg_types.append("cuboid")
+        st.rerun()
+
+    if not seg_params:
+        st.info("Add at least one segment above to compute volume and L/D.")
+        V, LD = 0.01, 1.0
+    else:
+        V_si, L_si = enclosure_volume_and_length(seg_params)
+        D_eq_si    = equivalent_diameter(V_si, L_si)
+        V_disp, L_disp, D_eq_disp = V_si / factor**3, L_si / factor, D_eq_si / factor
+
+        geom_left, geom_right = st.columns([1, 1], gap="large")
+
+        with geom_left:
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Total Volume V",       f"{V_disp:.2f} {u3}")
+            m2.metric("Total Height L",       f"{L_disp:.2f} {u_lbl}")
+            m3.metric("Equiv. Diameter D_eq", f"{D_eq_disp:.2f} {u_lbl}",
+                      help="2√(V / πL) — diameter of a cylinder with same V and L")
+            if unit != "m":
+                m1.caption(f"{V_si:.2f} m³")
+                m2.caption(f"{L_si:.2f} m")
+                m3.caption(f"{D_eq_si:.2f} m")
+
+            st.caption(
+                "D_eq assumes a circular cross-section. "
+                "Override with the actual characteristic diameter for rectangular enclosures."
+            )
+            D_override_disp = st.number_input(
+                f"Override D [{u_lbl}]",
+                min_value=mpos,
+                value=round(D_eq_disp, 3) if D_eq_disp > 0 else round(1.0 / factor, 3),
+                step=step,
+                format="%.2f",
+                key="eb_D_override",
+            )
+            D_override_si = D_override_disp * factor
+            ld_final = ld_ratio(L_si, D_override_si)
+            st.metric("L/D", f"{ld_final:.2f}")
+
+            if ld_final > 6.0:
+                st.warning(
+                    f"L/D = {ld_final:.2f} exceeds 6.0 — outside NFPA 68 §8.1.1 scope. "
+                    "Verify applicability with your engineer of record."
+                )
+
+        with geom_right:
+            fig = _build_3d_figure(seg_params)
+            st.plotly_chart(fig, use_container_width=True)
+
+        V, LD = V_si, ld_final
 
 st.markdown("---")
 
@@ -170,16 +529,12 @@ with r1_left:
                                    label_visibility="collapsed")
 
     lc, ic = st.columns([1, 1], gap="small")
-    _label(lc, "Volume V [m³]")
-    V = ic.number_input("Volume V [m³]", label_visibility="collapsed",
-                        value=float(_eb["V"] if _eb else _pre("enclosure.V", 25.0)),
-                        min_value=0.01, step=0.5, format="%.2f")
+    _label(lc, "Volume V [m³]", "Set above in Enclosure Geometry")
+    ic.markdown(f"`{V:.4f} m³`")
 
     lc, ic = st.columns([1, 1], gap="small")
-    _label(lc, "L/D ratio [—]")
-    LD = ic.number_input("L/D ratio [—]", label_visibility="collapsed",
-                         value=float(min(_eb["LD"], 6.0) if _eb else _pre("enclosure.LD", 1.0)),
-                         min_value=1.0, max_value=6.0, step=0.1, format="%.2f")
+    _label(lc, "L/D ratio [—]", "Set above in Enclosure Geometry")
+    ic.markdown(f"`{LD:.2f}`")
 
     lc, ic = st.columns([1, 1], gap="small")
     _label(lc, "Solid volume [m³]", "Volume of solid objects inside (§8.4.1)")
