@@ -33,6 +33,8 @@ def inputs_to_dict(
     subatm_method=None,
     flexible_filters: bool = False,
     calc_variant: str = "standard",
+    selection: dict | None = None,
+    geometry: dict | None = None,
 ) -> dict:
     """Serialize all calculation inputs to a JSON-safe dict."""
     return {
@@ -46,6 +48,8 @@ def inputs_to_dict(
         "partial_volume":   _clean(partial_volume) if partial_volume else None,
         "subatm_method":    subatm_method.name if subatm_method else "GENERAL",
         "flexible_filters": flexible_filters,
+        "selection":        selection,
+        "geometry":         geometry,
     }
 
 
@@ -61,6 +65,7 @@ def build_run_payload(
     inputs: dict,
     outputs: dict,
     calc_type: str = "dust_vent_nfpa68_ch8",
+    comments: str = "",
 ) -> dict:
     """Assemble the full run payload (meta + inputs + outputs)."""
     from datetime import datetime
@@ -71,6 +76,7 @@ def build_run_payload(
             "calc_type": calc_type,
             "standard":  "NFPA 68 (2023)",
             "engineer":  engineer,
+            "comments":  comments,
             "timestamp": datetime.now().isoformat(),
         },
         "inputs":  inputs,

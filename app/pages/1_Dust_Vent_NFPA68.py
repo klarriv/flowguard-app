@@ -21,6 +21,10 @@ from core.enclosure_catalog import (
     circular_enclosure_default, rectangular_enclosure_default,
     list_families, list_models, get_model,
 )
+from core.vent_panel_catalog import (
+    list_manufacturers, list_panel_types as list_vent_panel_types,
+    compute_panel_selection,
+)
 from explosion_protection.nfpa_68_ch6_equations import ld_ratio as ch6_ld_ratio
 from explosion_protection.nfpa_68_ch8_dust_vent import (
     Enclosure, Dust, Vent, Duct, TurbulenceInputs, PartialVolumeInputs,
@@ -94,10 +98,46 @@ def _mesh_box(ax: float, bx: float, ax2: float, bx2: float, h: float, z0: float)
     return x, y, z, ii, jj, kk
 
 
+def _segment_footprint(seg: dict) -> tuple[float, float]:
+    """Natural (width, depth) footprint of one copy of a segment — the top-facing
+    size used to space tiled side-by-side copies without overlap."""
+    stype = seg["type"]
+    if stype in ("cylinder", "truncated_cone"):
+        d = 2 * max(seg.get("r", 0.0), seg.get("R", 0.0))
+        return d, d
+    if stype == "cuboid":
+        return seg["a"], seg["b"]
+    if stype == "truncated_rect_pyramid":
+        return seg["A"], seg["B"]
+    return 0.0, 0.0
+
+
 def _build_3d_figure(seg_params: list[dict]) -> go.Figure:
     """Build a Plotly 3D figure. seg_params dicts carry SI values."""
     traces = []
     z_base = sum(seg["h"] for seg in seg_params)   # top of the stack
+
+    # Group consecutive segments sharing the same (cols, rows) into runs, so a
+    # repeated sub-stack (e.g. a hopper and the barrel below it, both tiled
+    # x4) uses one consistent spacing and stays aligned copy-for-copy.
+    run_of: dict[int, int] = {}
+    run_members: dict[int, list[int]] = {}
+    cur_run_id, cur_key = None, None
+    for idx, seg in enumerate(seg_params):
+        key = (seg.get("cols", 1), seg.get("rows", 1))
+        if key != cur_key:
+            cur_run_id, cur_key = idx, key
+            run_members[cur_run_id] = []
+        run_of[idx] = cur_run_id
+        run_members[cur_run_id].append(idx)
+
+    run_spacing = {
+        run_id: (
+            max(_segment_footprint(seg_params[i])[0] for i in idxs),
+            max(_segment_footprint(seg_params[i])[1] for i in idxs),
+        )
+        for run_id, idxs in run_members.items()
+    }
 
     for idx, seg in enumerate(seg_params):
         z_base -= seg["h"]
@@ -117,20 +157,32 @@ def _build_3d_figure(seg_params: list[dict]) -> go.Figure:
         else:
             continue
 
-        xv, yv, zv, iv, jv, kv = args
-        traces.append(go.Mesh3d(
-            x=xv, y=yv, z=zv,
-            i=iv, j=jv, k=kv,
-            color=color,
-            opacity=0.88,
-            flatshading=True,
-            name=f"Seg {idx + 1} — {label}",
-            showlegend=True,
-            hovertemplate=(
-                f"<b>Segment {idx + 1}</b><br>{label}<br>"
-                f"V = {seg['vol_si']:.4f} m³<extra></extra>"
-            ),
-        ))
+        xv0, yv0, zv, iv, jv, kv = args
+        cols, rows  = seg.get("cols", 1), seg.get("rows", 1)
+        ref_w, ref_h = run_spacing[run_of[idx]]
+
+        first_copy = True
+        for j in range(cols):
+            for k in range(rows):
+                ox = (j - (cols - 1) / 2) * ref_w
+                oy = (k - (rows - 1) / 2) * ref_h
+                xv = [x + ox for x in xv0] if (ox or oy) else xv0
+                yv = [y + oy for y in yv0] if (ox or oy) else yv0
+                copy_note = f" — copy {j * rows + k + 1}/{cols * rows}" if cols * rows > 1 else ""
+                traces.append(go.Mesh3d(
+                    x=xv, y=yv, z=zv,
+                    i=iv, j=jv, k=kv,
+                    color=color,
+                    opacity=0.88,
+                    flatshading=True,
+                    name=f"Seg {idx + 1} — {label}",
+                    showlegend=first_copy,
+                    hovertemplate=(
+                        f"<b>Segment {idx + 1}</b>{copy_note}<br>{label}<br>"
+                        f"V = {seg['vol_si']:.4f} m³<extra></extra>"
+                    ),
+                ))
+                first_copy = False
 
     if not traces:
         return go.Figure()
@@ -162,11 +214,20 @@ def _seed_segments(segments: list[dict]) -> None:
     st.session_state.eb_seg_types = [s["type"] for s in segments]
     for i, seg in enumerate(segments):
         st.session_state[f"eb_type_sel_{i}"] = SHAPES[seg["type"]]
+        cols, rows = seg.get("cols", 1), seg.get("rows", 1)
+        st.session_state.pop(f"eb_arrange_{i}", None)
+        if cols * rows == 4:
+            st.session_state[f"eb_copies_{i}"] = "4"
+        elif cols * rows == 2:
+            st.session_state[f"eb_copies_{i}"] = "2"
+            st.session_state[f"eb_arrange_{i}"] = "Along X" if cols == 2 else "Along Y"
+        else:
+            st.session_state[f"eb_copies_{i}"] = "1"
         for k, v in seg.items():
-            if k != "type":
+            if k not in ("type", "cols", "rows"):
                 st.session_state[f"eb_{k}_{i}"] = float(v)
     for i in range(len(segments), old_len):
-        for suffix in ("a", "b", "h", "r", "R", "A", "B", "type_sel"):
+        for suffix in ("a", "b", "h", "r", "R", "A", "B", "type_sel", "copies", "arrange"):
             st.session_state.pop(f"eb_{suffix}_{i}", None)
 
 
@@ -208,6 +269,15 @@ with st.sidebar:
 
 # ── Pre-fill from loaded run ───────────────────────────────────────────────────
 loaded = st.session_state.pop("loaded_run", None)
+
+if loaded and (loaded.get("inputs") or {}).get("geometry"):
+    _geo = loaded["inputs"]["geometry"]
+    st.session_state["eg_mode"] = _geo["mode"]
+    st.session_state["eb_unit"] = "m"  # segments are persisted in SI; _seed_segments expects SI
+    if _geo["mode"] == "Donaldson" and _geo.get("donaldson_family") and _geo.get("donaldson_model"):
+        st.session_state["eg_family"] = _geo["donaldson_family"]
+        st.session_state["eg_model"]  = _geo["donaldson_model"]
+    _seed_segments(_geo["segments"])
 
 def _pre(key: str, default):
     if loaded is None:
@@ -309,14 +379,14 @@ st.markdown("""
 }
 </style>
 """, unsafe_allow_html=True)
-reset_col, _ = st.columns([1, 4])
+_, reset_col = st.columns([4, 1])
 if reset_col.button("🔄 Reset All", key="reset_all_btn", use_container_width=True):
     for k in list(st.session_state.keys()):
         if k.startswith("eb_") or k.startswith("eg_"):
             del st.session_state[k]
     st.rerun()
 
-GEOM_MODES = ["Circular Enclosure", "Rectangular Enclosure", "Donaldson", "Custom", "Manual Input"]
+GEOM_MODES = ["Circular Enclosure", "Rectangular Enclosure", "Donaldson", "Manual Input"]
 _prev_geom_mode = st.session_state.get("eg_mode", "Manual Input")
 geom_mode = st.selectbox(
     "Enclosure geometry method",
@@ -355,13 +425,18 @@ elif geom_mode == "Circular Enclosure" and _reseed:
     _seed_segments(circular_enclosure_default())
 elif geom_mode == "Rectangular Enclosure" and _reseed:
     _seed_segments(rectangular_enclosure_default())
-elif geom_mode == "Custom" and _reseed:
-    st.session_state.eb_seg_types = []
-
 st.session_state["eg_mode"] = geom_mode
+
+# Capture the Donaldson identity before `family` gets reused below for the
+# cross-section shape family (circular/square/rectangular).
+donaldson_family, donaldson_model = (
+    (family, model_name) if geom_mode == "Donaldson" else (None, None)
+)
 
 if _reseed:
     st.rerun()
+
+geometry_dict = None
 
 if geom_mode == "Manual Input":
     lc, ic = st.columns([1, 1], gap="small")
@@ -399,6 +474,12 @@ else:
     factor = UNIT_TO_M[unit]
     u_lbl  = unit
     u3     = f"{unit}³" if unit != "in" else "in³"
+
+    st.caption(
+        "For parallel discharge paths (e.g. a hopper and the barrel below it, "
+        "repeated side by side), set the same copies/arrangement on every "
+        "segment you want grouped so the 3D view renders them aligned."
+    )
 
     seg_params: list[dict] = []
     delete_idx = None
@@ -458,16 +539,46 @@ else:
                 h = c5.number_input(f"Height h [{u_lbl}]", min_value=mpos, value=st.session_state.get(f"eb_h_{i}", 1.0), step=step, format="%.3f", key=f"eb_h_{i}")
                 params.update(A=A * factor, B=B * factor, a=a * factor, b=b * factor, h=h * factor)
 
+            cc1, cc2 = st.columns([1, 2])
+            copy_opts = ["1", "2", "4"]
+            copies_label = cc1.selectbox(
+                "Side-by-side copies", copy_opts,
+                index=copy_opts.index(st.session_state.get(f"eb_copies_{i}", "1")),
+                key=f"eb_copies_{i}",
+                help="Identical copies of this segment arranged side by side "
+                     "(e.g. multiple hoppers under one shared body).",
+            )
+            if copies_label == "2":
+                arrange_opts = ["Along X", "Along Y"]
+                arrangement = cc2.radio(
+                    "Arrangement", arrange_opts,
+                    index=arrange_opts.index(st.session_state.get(f"eb_arrange_{i}", "Along X")),
+                    key=f"eb_arrange_{i}", horizontal=True,
+                )
+                cols_n, rows_n = (2, 1) if arrangement == "Along X" else (1, 2)
+            elif copies_label == "4":
+                cols_n, rows_n = 2, 2
+            else:
+                cols_n, rows_n = 1, 1
+            params["cols"], params["rows"] = cols_n, rows_n
+
             vol_si = segment_volume(params)
             params["vol_si"] = vol_si
             vol_disp = vol_si / factor**3
-            st.caption(f"Segment volume: **{vol_disp:.4f} {u3}** ({vol_si:.4f} m³)")
+            count = cols_n * rows_n
+            if count > 1:
+                st.caption(
+                    f"Segment volume: **{vol_disp:.4f} {u3}** × {count} copies = "
+                    f"**{vol_disp * count:.4f} {u3}** ({vol_si * count:.4f} m³ total)"
+                )
+            else:
+                st.caption(f"Segment volume: **{vol_disp:.4f} {u3}** ({vol_si:.4f} m³)")
 
             seg_params.append(params)
 
     if delete_idx is not None:
         st.session_state.eb_seg_types.pop(delete_idx)
-        for suffix in ("a", "b", "h", "r", "R", "A", "B", "type_sel"):
+        for suffix in ("a", "b", "h", "r", "R", "A", "B", "type_sel", "copies", "arrange"):
             st.session_state.pop(f"eb_{suffix}_{delete_idx}", None)
         st.rerun()
 
@@ -527,6 +638,13 @@ else:
             st.plotly_chart(fig, use_container_width=True)
 
         V, LD = V_si, ld_final
+
+        geometry_dict = {
+            "mode": geom_mode, "unit": unit, "segments": seg_params,
+            "V": V_si, "L": L_si, "Dhe": Dhe_si, "LD": ld_final,
+            "cross_section_family": family,
+            "donaldson_family": donaldson_family, "donaldson_model": donaldson_model,
+        }
 
 st.markdown("---")
 
@@ -947,6 +1065,126 @@ if run_calc or "last_result" in st.session_state:
         e2.metric("PEmax",       f"{result.PEmax:.4f} bar-g")
         e3.metric("Π effective", f"{result.Pi_effective:.4f}")
 
+    # ── Selection ─────────────────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("## Selection")
+    st.caption("Filter the vent panel catalog, then choose the final panel selection")
+
+    fc0, fc1, fc2, fc3 = st.columns([1, 1, 1, 1.1])
+
+    all_manufacturers = list_manufacturers()
+    _prev_manufacturers = st.session_state.get(
+        "sel_manufacturers", _pre("selection.filter_manufacturers", all_manufacturers)
+    )
+    sel_manufacturers = fc0.multiselect(
+        "Manufacturer (filter)", all_manufacturers,
+        default=[m for m in _prev_manufacturers if m in all_manufacturers] or all_manufacturers,
+    )
+    st.session_state["sel_manufacturers"] = sel_manufacturers
+
+    all_panel_types = sorted({pt for m in (sel_manufacturers or all_manufacturers) for pt in list_vent_panel_types(m)})
+    _prev_panel_types = st.session_state.get(
+        "sel_panel_types", _pre("selection.filter_panel_types", all_panel_types)
+    )
+    sel_panel_types = fc1.multiselect(
+        "Panel Type (filter)", all_panel_types,
+        default=[t for t in _prev_panel_types if t in all_panel_types] or all_panel_types,
+    )
+    st.session_state["sel_panel_types"] = sel_panel_types
+
+    efficiency_pct = fc2.number_input(
+        "Efficiency [%]", min_value=1.0, max_value=100.0,
+        value=float(_pre("selection.efficiency_pct", 70.0)),
+        step=1.0, format="%.0f",
+    )
+    efficiency = efficiency_pct / 100.0
+
+    stocked_only = fc3.toggle(
+        "Stocked sizes only",
+        value=st.session_state.get("sel_stocked_only", bool(_pre("selection.stocked_only", True))),
+        help="Limit to nominal sizes normally kept in stock. Turn off to see the full manufacturer range.",
+    )
+    st.session_state["sel_stocked_only"] = stocked_only
+
+    selection_rows = (
+        compute_panel_selection(result.Avf, sel_manufacturers, sel_panel_types, efficiency, stocked_only=stocked_only)
+        if sel_manufacturers and sel_panel_types else []
+    )
+    selection_dict = None
+
+    st.caption(
+        f"Avf = {result.Avf:.4f} m² · Efficiency = {efficiency_pct:.0f}% · "
+        f"{'stocked sizes only' if stocked_only else 'full manufacturer range'} · "
+        f"sorted by panels required"
+    )
+
+    if selection_rows:
+        _prev_final = (
+            _pre("selection.manufacturer", None),
+            _pre("selection.model", None),
+            _pre("selection.panel_type", None),
+        )
+        default_idx = next(
+            (i for i, r in enumerate(selection_rows)
+             if (r.panel.manufacturer, r.panel.model, r.panel.panel_type) == _prev_final),
+            0,
+        )
+
+        st.caption("Click a row to make it the final selection.")
+        table_state = st.dataframe(
+            [
+                {
+                    "Manufacturer": row.panel.manufacturer,
+                    "Model": row.panel.model,
+                    "Nominal (metric)": row.panel.nominal_metric,
+                    "Nominal (imperial)": row.panel.nominal_imperial,
+                    "Vent Area (m²)": round(row.panel.surf_m2, 4),
+                    "Panel Density (kg/m²)": round(row.panel.panel_density_kgm2, 3),
+                    "Panels Required": row.panels_required,
+                    "Total Effective Area (m²)": round(row.total_effective_area_m2, 4),
+                }
+                for row in selection_rows
+            ],
+            use_container_width=True,
+            hide_index=True,
+            on_select="rerun",
+            selection_mode="single-row-required",
+            selection_default={"selection": {"rows": [default_idx]}},
+            key="selection_table",
+        )
+        chosen_idx = table_state["selection"]["rows"][0]
+        chosen = selection_rows[chosen_idx]
+
+        st.success(
+            f"Final selection: **{chosen.panel.manufacturer} {chosen.panel.model} "
+            f"{chosen.panel.nominal_metric}** ({chosen.panel.panel_type}) — "
+            f"{chosen.panels_required} panel(s), "
+            f"{chosen.total_effective_area_m2:.4f} m² total effective area"
+        )
+
+        selection_dict = {
+            "manufacturer":            chosen.panel.manufacturer,
+            "panel_type":              chosen.panel.panel_type,
+            "model":                   chosen.panel.model,
+            "nominal_metric":          chosen.panel.nominal_metric,
+            "nominal_imperial":        chosen.panel.nominal_imperial,
+            "vent_area_m2":            chosen.panel.surf_m2,
+            "panel_density_kgm2":      chosen.panel.panel_density_kgm2,
+            "efficiency_pct":          efficiency_pct,
+            "panels_required":         chosen.panels_required,
+            "total_effective_area_m2": chosen.total_effective_area_m2,
+            "filter_manufacturers":    sel_manufacturers,
+            "filter_panel_types":      sel_panel_types,
+            "stocked_only":            stocked_only,
+        }
+    elif sel_manufacturers and sel_panel_types:
+        st.info(
+            "No panels match this manufacturer/type combination with the current filters. "
+            + ("Try turning off \"Stocked sizes only\"." if stocked_only else "")
+        )
+    else:
+        st.info("Select at least one manufacturer and panel type to see vent panel options.")
+
     # ── Report / Export ───────────────────────────────────────────────────────
     st.markdown("---")
     st.markdown("### 📋 Report / Export")
@@ -956,10 +1194,15 @@ if run_calc or "last_result" in st.session_state:
     calc_label  = rc1.text_input("Calculation label", value=_pre_meta("label"), placeholder="e.g. DLMC 4/8/15")
     engineer    = rc2.text_input("Engineer", value=_pre_meta("engineer"), placeholder="Name")
 
+    comments = st.text_area(
+        "Comments", value=_pre_meta("comments"),
+        placeholder="Any comments on this calculation…", height=100,
+    )
+
     enc_o, dust_o, vent_o, duct_o, tm, ti, pv, sm, ff, cv = st.session_state["last_inputs"]
-    inp_dict = inputs_to_dict(enc_o, dust_o, vent_o, duct_o, tm, ti, pv, sm, ff, cv)
+    inp_dict = inputs_to_dict(enc_o, dust_o, vent_o, duct_o, tm, ti, pv, sm, ff, cv, selection=selection_dict, geometry=geometry_dict)
     out_dict = result_to_dict(result)
-    payload  = build_run_payload(project_num, calc_label, engineer, inp_dict, out_dict)
+    payload  = build_run_payload(project_num, calc_label, engineer, inp_dict, out_dict, comments=comments)
 
     e1, e2 = st.columns(2)
 

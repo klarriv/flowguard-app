@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 import base64
+import html as html_lib
 
 try:
     from weasyprint import HTML as WP_HTML
@@ -70,6 +71,30 @@ def _row(label: str, value: str, ref: str = "", alt: bool = False, highlight: bo
     )
 
 
+_SHAPE_LABELS = {
+    "cuboid":                 "Rectangular Box",
+    "cylinder":               "Cylinder",
+    "truncated_cone":         "Truncated Cone (Conical Hopper)",
+    "truncated_rect_pyramid": "Truncated Rectangular Pyramid (Hopper)",
+}
+
+_CROSS_SECTION_LABELS = {"circular": "Circular", "square": "Square", "rectangular": "Rectangular"}
+
+
+def _seg_dims(seg: dict) -> str:
+    t = seg.get("type")
+    if t == "cuboid":
+        return f"a={_fmt(seg.get('a'), 3)} m, b={_fmt(seg.get('b'), 3)} m, h={_fmt(seg.get('h'), 3)} m"
+    if t == "cylinder":
+        return f"r={_fmt(seg.get('r'), 3)} m, h={_fmt(seg.get('h'), 3)} m"
+    if t == "truncated_cone":
+        return f"R={_fmt(seg.get('R'), 3)} m, r={_fmt(seg.get('r'), 3)} m, h={_fmt(seg.get('h'), 3)} m"
+    if t == "truncated_rect_pyramid":
+        return (f"A={_fmt(seg.get('A'), 3)} m, B={_fmt(seg.get('B'), 3)} m, "
+                f"a={_fmt(seg.get('a'), 3)} m, b={_fmt(seg.get('b'), 3)} m, h={_fmt(seg.get('h'), 3)} m")
+    return "—"
+
+
 def _build_html(run: dict, logo_path: Optional[str] = None) -> str:
     """Build the HTML string for the calculation report."""
     meta  = run.get("meta", {})
@@ -79,6 +104,22 @@ def _build_html(run: dict, logo_path: Optional[str] = None) -> str:
     dust  = inp.get("dust", {})
     vent  = inp.get("vent", {})
     duct  = inp.get("duct")
+    sel   = inp.get("selection")
+    geo   = inp.get("geometry")
+
+    # Section numbers are computed rather than hardcoded so the optional
+    # sections (Geometry, Vent Panel Selection, Comments) don't leave a gap
+    # in the numbering when omitted (e.g. Manual Input has no geometry).
+    has_selection = bool(sel and sel.get("model"))
+    has_comments  = bool(meta.get("comments"))
+    _n = 1
+    geom_num = _n if geo else None
+    if geo: _n += 1
+    input_num, chain_num, compliance_num = _n, _n + 1, _n + 2
+    _n += 3
+    selection_num = _n if has_selection else None
+    if has_selection: _n += 1
+    comments_num = _n if has_comments else None
 
     ts     = meta.get("timestamp", datetime.now().isoformat())
     ts_fmt = datetime.fromisoformat(ts).strftime("%B %d, %Y  %H:%M")
@@ -163,6 +204,72 @@ def _build_html(run: dict, logo_path: Optional[str] = None) -> str:
             Elevated / Subatmospheric Pressure Intermediates
         </h3>
         <table style="width:100%;border-collapse:collapse;font-size:0.88em">{er}</table>
+        """
+
+    # ── Optional enclosure geometry section (skipped for Manual Input) ────────
+    geometry_section = ""
+    if geo:
+        mode = geo.get("mode", "—")
+        if mode == "Donaldson":
+            method_label = f"Donaldson — {geo.get('donaldson_family', '—')} · {geo.get('donaldson_model', '—')}"
+        else:
+            method_label = mode
+        shape_label = _CROSS_SECTION_LABELS.get(geo.get("cross_section_family"), geo.get("cross_section_family", "—"))
+
+        geo_summary_rows = (
+            _row("Method",                 method_label,                    "") +
+            _row("Volume V",               f"{_fmt(geo.get('V'), 2)} m³",   "", alt=True) +
+            _row("Height L",               f"{_fmt(geo.get('L'), 2)} m",    "") +
+            _row("Hydraulic diameter Dhe", f"{_fmt(geo.get('Dhe'), 2)} m",  "§6.4.3.6", alt=True) +
+            _row("L/D",                    f"{_fmt(geo.get('LD'), 2)} —",   "§8.1.1") +
+            _row("Cross-section shape",    shape_label,                     "", alt=True)
+        )
+
+        geo_seg_rows = ""
+        for i, seg in enumerate(geo.get("segments", [])):
+            copies = seg.get("cols", 1) * seg.get("rows", 1)
+            copies_str = f" × {copies} copies" if copies > 1 else ""
+            geo_seg_rows += _row(
+                f"Segment {i + 1} — {_SHAPE_LABELS.get(seg.get('type'), seg.get('type'))}{copies_str}",
+                _seg_dims(seg),
+                f"V = {_fmt(seg.get('vol_si'), 4)} m³",
+                alt=(i % 2 == 0),
+            )
+
+        geometry_section = f"""
+        <h2>{geom_num} &middot; Enclosure Geometry</h2>
+        <table>{geo_summary_rows}</table>
+        <table style="margin-top:10px">{geo_seg_rows}</table>
+        """
+
+    # ── Optional vent panel selection section (final pick only) ───────────────
+    selection_section = ""
+    if sel and sel.get("model"):
+        sr = (
+            _row("Manufacturer",              sel.get("manufacturer", "—"), "") +
+            _row("Model",                     sel.get("model", "—"),        "", alt=True) +
+            _row("Panel type",                sel.get("panel_type", "—"),   "") +
+            _row("Nominal (metric)",          sel.get("nominal_metric", "—"),   "", alt=True) +
+            _row("Nominal (imperial)",        sel.get("nominal_imperial", "—"), "") +
+            _row("Vent area",                 f"{_fmt(sel.get('vent_area_m2'), 4)} m²",        "", alt=True) +
+            _row("Panel density",             f"{_fmt(sel.get('panel_density_kgm2'), 3)} kg/m²","") +
+            _row("Efficiency",                f"{_fmt(sel.get('efficiency_pct'), 0)}%",         "", alt=True) +
+            _row("Panels required",           f"{sel.get('panels_required', '—')} —",           "", highlight=True) +
+            _row("Total effective vent area", f"{_fmt(sel.get('total_effective_area_m2'), 4)} m²", "", highlight=True)
+        )
+        selection_section = f"""
+        <h2>{selection_num} &middot; Vent Panel Selection</h2>
+        <table>{sr}</table>
+        """
+
+    # ── Optional comments section ──────────────────────────────────────────────
+    comments_section = ""
+    comments = meta.get("comments")
+    if comments:
+        comments_html = html_lib.escape(comments).replace("\n", "<br>")
+        comments_section = f"""
+        <h2>{comments_num} &middot; Comments</h2>
+        <p style="font-size:0.88em;line-height:1.6;white-space:pre-wrap">{comments_html}</p>
         """
 
     # ── Full HTML document ────────────────────────────────────────────────────
@@ -285,7 +392,9 @@ def _build_html(run: dict, logo_path: Optional[str] = None) -> str:
     <div class="sub">Final value after all applicable corrections · NFPA 68 (2023) §8.5</div>
   </div>
 
-  <h2>1 · Input Parameters</h2>
+  {geometry_section}
+
+  <h2>{input_num} · Input Parameters</h2>
   <div class="two-col">
     <div>
       <table>
@@ -319,13 +428,17 @@ def _build_html(run: dict, logo_path: Optional[str] = None) -> str:
     </div>
   </div>
 
-  <h2>2 · Calculation Chain</h2>
+  <h2>{chain_num} · Calculation Chain</h2>
   <table>{chain_rows}</table>
   {elev_section}
   {duct_section}
 
-  <h2>3 · Compliance Summary</h2>
+  <h2>{compliance_num} · Compliance Summary</h2>
   <table>{comp_rows}</table>
+
+  {selection_section}
+
+  {comments_section}
 
   <div class="disclaimer">
     This calculation was performed using the equations and procedures of NFPA 68 Standard on Explosion
