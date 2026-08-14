@@ -51,14 +51,6 @@ def _fmt(v, dec=4) -> str:
     return str(v)
 
 
-def _check(ok: Optional[bool]) -> str:
-    if ok is None:
-        return ""
-    color  = P["pass"] if ok else P["fail"]
-    symbol = "✓ Pass"  if ok else "✗ Fail"
-    return f'<span style="color:{color};font-weight:600">{symbol}</span>'
-
-
 def _row(label: str, value: str, ref: str = "", alt: bool = False, highlight: bool = False) -> str:
     bg = P["accent_lt"] if highlight else (P["bg_alt"] if alt else "#fff")
     fw = "700" if highlight else "400"
@@ -68,6 +60,34 @@ def _row(label: str, value: str, ref: str = "", alt: bool = False, highlight: bo
         f'<td style="padding:6px 10px;font-weight:{fw};font-family:monospace">{value}</td>'
         f'<td style="padding:6px 10px;color:{P["muted"]};font-size:0.82em">{ref}</td>'
         f'</tr>'
+    )
+
+
+def _chain_row(label: str, value: str, detail: str, ref: str,
+                alt: bool = False, highlight: bool = False, danger: bool = False) -> str:
+    """Row for the Calculation Chain table — like _row() but with a 4th
+    "Correction Details" column, and a `danger` state (DDT failure) distinct
+    from the plain `highlight` state (final-row emphasis)."""
+    if danger:
+        bg, border, fw = "#F5C6C2", f"border-left:4px solid {P['fail']};", "700"
+    elif highlight:
+        bg, border, fw = P["accent_lt"], "", "700"
+    else:
+        bg, border, fw = (P["bg_alt"] if alt else "#fff"), "", "400"
+    return (
+        f'<tr style="background:{bg};{border}">'
+        f'<td style="padding:6px 10px;font-weight:{fw};width:28%">{label}</td>'
+        f'<td style="padding:6px 10px;font-weight:{fw};font-family:monospace;width:12%">{value}</td>'
+        f'<td style="padding:6px 10px;font-size:0.85em;width:35%">{detail}</td>'
+        f'<td style="padding:6px 10px;color:{P["muted"]};font-size:0.82em;width:25%">{ref}</td>'
+        f'</tr>'
+    )
+
+
+def _subhead(text: str) -> str:
+    return (
+        f'<tr><td colspan="3" style="font-weight:700;background:{P["primary"]};'
+        f'color:#fff;padding:5px 10px">{text}</td></tr>'
     )
 
 
@@ -108,23 +128,42 @@ def _build_html(run: dict, logo_path: Optional[str] = None) -> str:
     geo   = inp.get("geometry")
 
     # Section numbers are computed rather than hardcoded so the optional
-    # sections (Geometry, Vent Panel Selection, Comments) don't leave a gap
-    # in the numbering when omitted (e.g. Manual Input has no geometry).
+    # sections (Geometry, Vent Panel Selection, Comments) don't leave a gap in
+    # the numbering when omitted (e.g. Manual Input has no geometry). This list
+    # mirrors the actual section order the sections are spliced into below, so
+    # the numbering can't drift out of sync with where a section is rendered.
     has_selection = bool(sel and sel.get("model"))
     has_comments  = bool(meta.get("comments"))
-    _n = 1
-    geom_num = _n if geo else None
-    if geo: _n += 1
-    input_num, chain_num, compliance_num = _n, _n + 1, _n + 2
-    _n += 3
-    selection_num = _n if has_selection else None
-    if has_selection: _n += 1
-    comments_num = _n if has_comments else None
+    section_order = [
+        ("geometry",   bool(geo)),
+        ("input",      True),
+        ("chain",      True),
+        ("selection",  has_selection),
+        ("comments",   has_comments),
+    ]
+    section_num = {}
+    _n = 0
+    for _key, _present in section_order:
+        if _present:
+            _n += 1
+            section_num[_key] = _n
+    geom_num       = section_num.get("geometry")
+    input_num      = section_num["input"]
+    chain_num      = section_num["chain"]
+    selection_num  = section_num.get("selection")
+    comments_num   = section_num.get("comments")
 
     ts     = meta.get("timestamp", datetime.now().isoformat())
     ts_fmt = datetime.fromisoformat(ts).strftime("%B %d, %Y  %H:%M")
     regime = out.get("pressure_regime", "NEAR_ATMOSPHERIC").replace("_", " ").title()
     turb   = out.get("turbulence_mode", "NONE").replace("_", " ").title()
+    flex_filters_bump = bool(out.get("flexible_filters_bump_active"))
+    av_final_caption = (
+        "Final value after all applicable corrections, including the 25% "
+        "flexible-filter obstruction increase · NFPA 68 (2023) §8.5, §8.7.2"
+        if flex_filters_bump else
+        "Final value after all applicable corrections · NFPA 68 (2023) §8.5"
+    )
 
     logo_b64  = _logo_b64(logo_path)
     logo_html = (
@@ -134,7 +173,45 @@ def _build_html(run: dict, logo_path: Optional[str] = None) -> str:
         f'{meta.get("project","")}</span>'
     )
 
-    # ── Calculation chain rows ────────────────────────────────────────────────
+    # ── Calculation chain rows — each row carries its own correction detail ────
+    def _chain_detail(sym: str) -> str:
+        if sym == "Av₀":
+            if out.get("Peffective") is not None:
+                return (f"{regime} · Peff={_fmt(out.get('Peffective'))} bar-g, "
+                        f"PEmax={_fmt(out.get('PEmax'))} bar-g, Π={_fmt(out.get('Pi_effective'))}")
+            return regime
+        if sym == "Av₁":
+            return "L/D: Active" if out.get("ld_correction_active") else "L/D: Not applied"
+        if sym == "Av₂":
+            mode = out.get("turbulence_mode", "NONE")
+            if mode == "PROCESS":
+                vtan_val = out.get("vtan")
+                vtan_str = f"{_fmt(vtan_val, 2)} m/s" if vtan_val is not None else "n/a"
+                return f"Process · vaxial={_fmt(out.get('vaxial'), 2)} m/s, vtan={vtan_str}"
+            if mode == "BUILDING":
+                return "Building (1.7×, §8.2.4.7)"
+            return "None"
+        if sym == "Av₃":
+            state = "Active" if out.get("panel_inertia_active") else "Not applied"
+            return f"Panel inertia: {state} (MT={_fmt(out.get('MT'), 3)} kg/m²)"
+        if sym == "Av₄":
+            if out.get("Xr") is None:
+                return "—"
+            state = "Active" if out.get("partial_volume_active") else "Not applied"
+            return f"Partial volume: {state} (Xr={_fmt(out.get('Xr'))})"
+        if sym == "Avf":
+            if not out.get("duct_active"):
+                return "No duct"
+            base = f"E1={_fmt(out.get('E1'))}, E2={_fmt(out.get('E2'))}"
+            if out.get("ddt_ok"):
+                return f"{base} · DDT ✓"
+            return f"{base} · <b>DDT ✗ FAILED</b> — Leff_max={_fmt(out.get('Leff_max'), 2)} m"
+        if sym == "Av,final":
+            return "Avf × 1.25"
+        return ""
+
+    ddt_failed = bool(out.get("duct_active")) and out.get("ddt_ok") is False
+
     chain_rows = ""
     steps = [
         ("Av₀", "Av0", "Minimum vent area",               "§8.2.1, Eq. 8.2.1.1"),
@@ -144,32 +221,24 @@ def _build_html(run: dict, logo_path: Optional[str] = None) -> str:
         ("Av₄", "Av4", "After partial volume correction", "§8.4, Eq. 8.4.3"),
         ("Avf", "Avf", "Final vent area (with duct)",     "§8.5.1, Eq. 8.5.1a"),
     ]
+    if flex_filters_bump:
+        steps.append((
+            "Av,final", "Av_final",
+            "Flexible filter obstruction increase (+25%)", "§8.7.2",
+        ))
     for i, (sym, key, desc, ref) in enumerate(steps):
-        chain_rows += _row(
+        chain_rows += _chain_row(
             f"{sym} &nbsp;<span style='font-weight:400;color:{P['muted']}'>{desc}</span>",
             f"{_fmt(out.get(key))} m²",
+            _chain_detail(sym),
             ref,
             alt=(i % 2 == 0),
-            highlight=(key == "Avf"),
+            highlight=(key == ("Av_final" if flex_filters_bump else "Avf")),
+            danger=(sym == "Avf" and ddt_failed),
         )
 
-    # ── Compliance rows ───────────────────────────────────────────────────────
-    comp_rows = (
-        _row("L/D correction applied",  "Yes" if out.get("ld_correction_active") else "No", "§8.2.2") +
-        _row("Panel inertia active",    "Yes" if out.get("panel_inertia_active") else "No", "§8.3", alt=True) +
-        _row("Panel mass threshold MT", f"{_fmt(out.get('MT'))} kg/m²",                    "§8.3.2, Eq. 8.3.2") +
-        _row("Partial volume active",   "Yes" if out.get("partial_volume_active") else "No","§8.4", alt=True) +
-        _row("Duct correction active",  "Yes" if out.get("duct_active") else "No",         "§8.5")
-    )
-    if out.get("ddt_ok") is not None:
-        comp_rows += _row(
-            "DDT limit check (§8.5.9)",
-            _check(out.get("ddt_ok")),
-            f"Leff_max = {_fmt(out.get('Leff_max'), 2)} m",
-            alt=True,
-        )
-
-    # ── Optional duct section ─────────────────────────────────────────────────
+    # ── Optional duct section (physical geometry only — E1/E2/DDT now live in
+    #    the Avf row's Correction Details cell above) ──────────────────────────
     duct_section = ""
     if duct and out.get("duct_active"):
         dr = (
@@ -177,9 +246,7 @@ def _build_html(run: dict, logo_path: Optional[str] = None) -> str:
             _row("Hydraulic diameter Dh",      f"{_fmt(duct.get('Dh'), 3)} m",     "§8.5", alt=True) +
             _row("Inlet coefficient Kinlet",   f"{_fmt(duct.get('Kinlet'), 2)} —", "Fig. A.8.5(a)") +
             _row("Elbow losses Kelbows",       f"{_fmt(duct.get('Kelbows'), 2)} —","Fig. A.8.5(b)", alt=True) +
-            _row("Outlet coefficient Koutlet", f"{_fmt(duct.get('Koutlet'), 2)} —","Fig. A.8.5(a)") +
-            _row("E1 parameter",               f"{_fmt(out.get('E1'))} —",         "Eq. 8.5.1b", alt=True) +
-            _row("E2 parameter",               f"{_fmt(out.get('E2'))} —",         "Eq. 8.5.1c")
+            _row("Outlet coefficient Koutlet", f"{_fmt(duct.get('Koutlet'), 2)} —","Fig. A.8.5(a)")
         )
         duct_section = f"""
         <h3 style="margin-top:24px;margin-bottom:8px;color:{P['primary']};
@@ -187,23 +254,6 @@ def _build_html(run: dict, logo_path: Optional[str] = None) -> str:
             Vent Duct Parameters — §8.5
         </h3>
         <table style="width:100%;border-collapse:collapse;font-size:0.88em">{dr}</table>
-        """
-
-    # ── Optional elevated pressure intermediates ──────────────────────────────
-    elev_section = ""
-    if out.get("Peffective") is not None:
-        er = (
-            _row("Pressure regime",  regime,                                 "§8.2.1") +
-            _row("Peffective",       f"{_fmt(out.get('Peffective'))} bar-g", "= ⅓·Pinitial", alt=True) +
-            _row("PEmax",            f"{_fmt(out.get('PEmax'))} bar-g",      "Eq. 8.2.1.2") +
-            _row("Π effective",      f"{_fmt(out.get('Pi_effective'))} —",   "Eq. 8.2.1.2", alt=True)
-        )
-        elev_section = f"""
-        <h3 style="margin-top:24px;margin-bottom:8px;color:{P['primary']};
-                   font-size:0.9em;letter-spacing:0.06em;text-transform:uppercase">
-            Elevated / Subatmospheric Pressure Intermediates
-        </h3>
-        <table style="width:100%;border-collapse:collapse;font-size:0.88em">{er}</table>
         """
 
     # ── Optional enclosure geometry section (skipped for Manual Input) ────────
@@ -352,14 +402,6 @@ def _build_html(run: dict, logo_path: Optional[str] = None) -> str:
   .result-box .sub {{ font-size:0.78em; color:{P['muted']}; margin-top:3px; }}
   .two-col {{ display:flex; gap:24px; }}
   .two-col > div {{ flex:1; }}
-  .disclaimer {{
-    margin-top: 28px;
-    padding: 10px 14px;
-    border-left: 3px solid {P['rule']};
-    font-size: 0.75em;
-    color: {P['muted']};
-    line-height: 1.5;
-  }}
 </style>
 </head>
 <body>
@@ -380,16 +422,14 @@ def _build_html(run: dict, logo_path: Optional[str] = None) -> str:
   <div class="meta-item"><span class="lbl">Calculation</span><span class="val">{meta.get('label','—')}</span></div>
   <div class="meta-item"><span class="lbl">Engineer</span><span class="val">{meta.get('engineer','—')}</span></div>
   <div class="meta-item"><span class="lbl">Date</span><span class="val">{ts_fmt}</span></div>
-  <div class="meta-item"><span class="lbl">Run ID</span><span class="val" style="font-family:monospace">{meta.get('id','—')}</span></div>
-  <div class="meta-item"><span class="lbl">Pressure Regime</span><span class="val">{regime}</span></div>
 </div>
 
 <div class="body">
 
   <div class="result-box">
-    <div class="lbl">MINIMUM REQUIRED VENT AREA  A<sub>vf</sub></div>
-    <div class="val">{_fmt(out.get('Avf'), 4)} m²</div>
-    <div class="sub">Final value after all applicable corrections · NFPA 68 (2023) §8.5</div>
+    <div class="lbl">MINIMUM REQUIRED VENT AREA</div>
+    <div class="val">{_fmt(out.get('Av_final'), 4)} m²</div>
+    <div class="sub">{av_final_caption}</div>
   </div>
 
   {geometry_section}
@@ -398,13 +438,13 @@ def _build_html(run: dict, logo_path: Optional[str] = None) -> str:
   <div class="two-col">
     <div>
       <table>
-        <tr><td colspan="3" style="font-weight:700;background:{P['primary']};color:#fff;padding:5px 10px">Enclosure — §8.1.1</td></tr>
+        {_subhead("Enclosure — §8.1.1")}
         {_row("Volume V",            f"{_fmt(enc.get('V'),2)} m³",     "§8.2.1")}
         {_row("L/D ratio",           f"{_fmt(enc.get('LD'),2)} —",     "§8.1.1", alt=True)}
         {_row("Solid volume Vsolid", f"{_fmt(enc.get('Vsolid'),2)} m³","§8.4.1")}
       </table>
       <table style="margin-top:10px">
-        <tr><td colspan="3" style="font-weight:700;background:{P['primary']};color:#fff;padding:5px 10px">Vent Panel — §8.3</td></tr>
+        {_subhead("Vent Panel — §8.3")}
         {_row("Reduced pressure Pred", f"{_fmt(vent.get('Pred'),3)} bar-g",  "§8.2.1")}
         {_row("Static burst Pstat",    f"{_fmt(vent.get('Pstat'),3)} bar-g", "§8.2.1", alt=True)}
         {_row("Number of panels n",    f"{vent.get('n','—')} —",             "§8.3.2")}
@@ -414,13 +454,14 @@ def _build_html(run: dict, logo_path: Optional[str] = None) -> str:
     </div>
     <div>
       <table>
-        <tr><td colspan="3" style="font-weight:700;background:{P['primary']};color:#fff;padding:5px 10px">Dust Characteristics — §8.1.2</td></tr>
+        {_subhead("Dust Characteristics — §8.1.2")}
         {_row("Deflagration index KSt", f"{_fmt(dust.get('KSt'),1)} bar·m/s","§8.1.2")}
         {_row("Maximum pressure Pmax",  f"{_fmt(dust.get('Pmax'),2)} bar-g", "§8.2.1", alt=True)}
         {_row("Initial pressure Pi",    f"{_fmt(dust.get('Pinitial'),3)} bar-g","§8.2.1")}
+        {_row("Pressure regime",        regime,                                 "§8.2.1", alt=True)}
       </table>
       <table style="margin-top:10px">
-        <tr><td colspan="3" style="font-weight:700;background:{P['primary']};color:#fff;padding:5px 10px">Turbulence — §8.2.4</td></tr>
+        {_subhead("Turbulence — §8.2.4")}
         {_row("Mode",                 turb,                                                                              "§8.2.4")}
         {_row("Axial velocity vaxial",f"{_fmt(out.get('vaxial'),2)} m/s" if out.get('vaxial') is not None else "—",     "§8.2.4.1", alt=True)}
         {_row("Tangential vel. vtan", f"{_fmt(out.get('vtan'),2)} m/s"   if out.get('vtan')   is not None else "—",     "§8.2.4.2")}
@@ -430,23 +471,11 @@ def _build_html(run: dict, logo_path: Optional[str] = None) -> str:
 
   <h2>{chain_num} · Calculation Chain</h2>
   <table>{chain_rows}</table>
-  {elev_section}
   {duct_section}
-
-  <h2>{compliance_num} · Compliance Summary</h2>
-  <table>{comp_rows}</table>
 
   {selection_section}
 
   {comments_section}
-
-  <div class="disclaimer">
-    This calculation was performed using the equations and procedures of NFPA 68 Standard on Explosion
-    Protection by Deflagration Venting (2023 edition), Chapter 8. The engineer of record is responsible
-    for verifying all input parameters, applicability conditions, and the final design against the
-    requirements of the applicable edition of NFPA 68 and all relevant local codes and regulations.
-    This document is a computational aid and does not constitute a stamped engineering document.
-  </div>
 
 </div>
 </body>

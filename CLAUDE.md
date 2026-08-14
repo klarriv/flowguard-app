@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 streamlit run app/app.py
 ```
 
-The app runs on `http://localhost:8501`. The `PROJECTS_ROOT` environment variable overrides the default projects directory (`projects/` at the repo root).
+The app runs on `http://localhost:8501`.
 
 PDF report generation requires WeasyPrint:
 
@@ -35,24 +35,28 @@ The Chapter 7 gas-vent equivalents (`nfpa_68_ch7_*.py`) exist but are not yet wi
 
 ### 2. Streamlit UI (`app/`)
 
-- `app.py` — home page; handles project selection/creation and shows a run list
-- `pages/1_Dust_Vent_NFPA68.py` — the main calculation page. Its top section, "Enclosure Geometry", lets the user establish V and L/D via a method dropdown (Circular Enclosure / Rectangular Enclosure / Donaldson / Custom / Manual Input) — the first four seed a segment-stack builder (add/edit/delete shape segments, unit toggle m/ft/in, 3D Plotly preview) from a preset or the Donaldson catalog, all fully editable afterward; Manual Input takes V and L/D directly. A "Reset All" button clears all geometry-section session state back to defaults. Any segment can be set to 1/2/4 side-by-side copies (with an along-X/along-Y arrangement choice for 2) to model parallel discharge paths — setting the same copies/arrangement on consecutive segments (e.g. a hopper and the barrel below it) groups them into one repeated, aligned sub-stack in the 3D view; this is a manual convention, not automatic grouping. For the segment-stack modes, the hydraulic diameter and L/D come directly from `core.geometry.enclosure_hydraulic_diameter()` and `explosion_protection.nfpa_68_ch6_equations.ld_ratio()` (§6.4.3) — no manual override. **Vent location is intentionally not modeled**: per §6.4.3.2/.3, V and L are taken as Veff and H exactly as built — the engineer is responsible for modeling the segment stack to already end at the vent (e.g. excluding roof headspace above a side-mounted vent), or per §6.4.3.4 conservatively using the whole enclosure; either way no vent-position input is needed. Multiple vents at different elevations along the same axis (§6.4.3.2.2, which calls for a per-section L/D) is a known, unsupported edge case. Below that, the rest of the page builds the remaining input widgets (Dust, Vent, Duct, Turbulence, Partial Volume), calls the engine, and renders the step-by-step result table. Between Results and Report/Export sits "Selection": Manufacturer and Panel Type are multiselect *filters* (default to everything in `core.vent_panel_catalog`, not a single-value picker) narrowing which catalog panels are considered; Efficiency [%] is a single numeric input; a "Stocked sizes only" toggle (default **on**) restricts to `STOCKED_SIZES_MM`, switchable off to see the full manufacturer range. Together they drive `compute_panel_selection(Avf, manufacturers, panel_types, efficiency, stocked_only)`, tabulating every matching catalog panel (Manufacturer, Model, Nominal metric/imperial, Vent Area, Panel Density, Panels Required, Total Effective Area — sorted ascending by panels required) so the engineer can compare options; a "Final Selection" dropdown below the table then picks exactly one row. Only that final pick (not the filtered table) is persisted to the run JSON and shown in the PDF report — the table is an on-page comparison aid. The Report/Export section also has a free-text "Comments" field (persisted to `meta.comments`, shown as its own section in the PDF, HTML-escaped). The page performs no engineering calculations itself — only widget wiring, session-state bookkeeping for the geometry builder, and the Plotly 3D mesh construction (`_mesh_frustum`/`_mesh_box`/`_build_3d_figure`), which is UI rendering, not physics.
-- `utils/project_store.py` — filesystem CRUD for projects and runs
+- `app.py` — home page; a static stub (logo, sidebar nav links to the calculation pages). No project selection/creation and no run list — see "Project data" below.
+- `pages/1_Dust_Vent_NFPA68.py` — the main calculation page. Its top section, "Enclosure Geometry", lets the user establish V and L/D via a method dropdown (Circular Enclosure / Rectangular Enclosure / Donaldson / Manual Input) — the first three seed a segment-stack builder (add/edit/delete shape segments, unit toggle m/ft/in, 3D Plotly preview) from a preset or the Donaldson catalog, all fully editable afterward; Manual Input takes V and L/D directly. A "Reset All" button clears all geometry-section session state back to defaults. Any segment can be set to 1/2/4 side-by-side copies (with an along-X/along-Y arrangement choice for 2) to model parallel discharge paths — setting the same copies/arrangement on consecutive segments (e.g. a hopper and the barrel below it) groups them into one repeated, aligned sub-stack in the 3D view; this is a manual convention, not automatic grouping. For the segment-stack modes, the hydraulic diameter and L/D come directly from `core.geometry.enclosure_hydraulic_diameter()` and `explosion_protection.nfpa_68_ch6_equations.ld_ratio()` (§6.4.3) — no manual override. **Vent location is intentionally not modeled**: per §6.4.3.2/.3, V and L are taken as Veff and H exactly as built — the engineer is responsible for modeling the segment stack to already end at the vent (e.g. excluding roof headspace above a side-mounted vent), or per §6.4.3.4 conservatively using the whole enclosure; either way no vent-position input is needed. Multiple vents at different elevations along the same axis (§6.4.3.2.2, which calls for a per-section L/D) is a known, unsupported edge case. Below that, the rest of the page builds the remaining input widgets (Dust, Vent, Duct, Turbulence, Partial Volume), calls the engine, and renders the step-by-step result table. Between Results and Report/Export sits "Selection": Manufacturer and Panel Type are multiselect *filters* (default to everything in `core.vent_panel_catalog`, not a single-value picker) narrowing which catalog panels are considered; Efficiency [%] is a single numeric input; a "Stocked sizes only" toggle (default **on**) restricts to `STOCKED_SIZES_MM`, switchable off to see the full manufacturer range. Together they drive `compute_panel_selection(Avf, manufacturers, panel_types, efficiency, stocked_only)`, tabulating every matching catalog panel (Manufacturer, Model, Nominal metric/imperial, Vent Area, Panel Density, Panels Required, Total Effective Area — sorted ascending by panels required) so the engineer can compare options; a "Final Selection" dropdown below the table then picks exactly one row. Only that final pick (not the filtered table) is persisted to the run JSON and shown in the PDF report — the table is an on-page comparison aid. The Report/Export section also has a free-text "Comments" field (persisted to `meta.comments`, shown as its own section in the PDF, HTML-escaped). The page performs no engineering calculations itself — only widget wiring, session-state bookkeeping for the geometry builder, and the Plotly 3D mesh construction (`_mesh_frustum`/`_mesh_box`/`_build_3d_figure`), which is UI rendering, not physics.
 - `utils/serializer.py` — converts engine dataclasses ↔ JSON-safe dicts for persistence and form pre-fill
 - `components/report.py` — generates a PDF report from a saved run dict using WeasyPrint (renders HTML → PDF). Includes an "Enclosure Geometry" section (method, V/L/Dhe/L/D, per-segment breakdown) whenever the run's `inputs.geometry` is present — i.e. whenever the run wasn't built with Manual Input. No 3D image is embedded — the segment-stack view is interactive-only, in the app's Plotly preview. Section numbers are computed, not hardcoded, so the optional sections (Geometry, Vent Panel Selection, Comments) don't leave gaps when omitted.
 
-### 3. Project data (`projects/`)
+### 3. Project data
 
-```
-projects/
-└── {project_name}/
-    ├── project.yaml          # name, client, description, created
-    └── runs/
-        ├── {run_id}.json     # inputs + outputs serialized by serializer.py
-        └── {run_id}.pdf      # generated report (optional)
-```
-
-Run IDs are 8-character UUID hex strings. Runs are loaded back into the UI via `load_run()`, which pre-fills the form through the `_pre()` helper in the page module. The Enclosure Geometry method, unit, and full segment breakdown are persisted alongside the resolved `V`/`LD`/`Vsolid` (needed for the PDF's Enclosure Geometry section), and reload re-seeds the segment builder from them via `_seed_segments()` — landing back on the original method (Circular/Rectangular/Donaldson) with the same segments, not Manual Input. Segments are always re-seeded in metres (`_seed_segments` stores values as-is with no unit conversion) regardless of the unit the run was originally built in; the user can switch display units afterward as normal. Runs saved before this geometry-persistence existed (or that used Manual Input) have no `inputs.geometry` key and still land on Manual Input with the saved `V`/`LD` numbers.
+There is no filesystem persistence — runs are not saved to disk anywhere by the app.
+A completed calculation is exported via "Download JSON" (the full inputs+outputs
+payload built by `build_run_payload()`) and/or "Download PDF". "Load Previous Run"
+in the sidebar re-uploads a previously-downloaded JSON file into
+`st.session_state["loaded_run"]`, which pre-fills the form through the `_pre()`
+helper in the page module. The Enclosure Geometry method, unit, and full segment
+breakdown are persisted in that JSON alongside the resolved `V`/`LD`/`Vsolid`
+(needed for the PDF's Enclosure Geometry section), and reload re-seeds the segment
+builder from them via `_seed_segments()` — landing back on the original method
+(Circular/Rectangular/Donaldson) with the same segments, not Manual Input. Segments
+are always re-seeded in metres (`_seed_segments` stores values as-is with no unit
+conversion) regardless of the unit the run was originally built in; the user can
+switch display units afterward as normal. Runs saved before this geometry-persistence
+existed (or that used Manual Input) have no `inputs.geometry` key and still land on
+Manual Input with the saved `V`/`LD` numbers.
 
 ## Key conventions
 

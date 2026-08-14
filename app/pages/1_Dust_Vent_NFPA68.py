@@ -54,6 +54,31 @@ SHAPES = {
 }
 SHAPE_LABELS = {v: k for k, v in SHAPES.items()}
 
+# Side-by-side segment copies: single source of truth for the
+# (copies_label, arrangement) <-> (cols, rows) mapping, looked up in both
+# directions (UI -> cols/rows in the editor loop, cols/rows -> UI in
+# _seed_segments) so the two can't drift apart.
+SEGMENT_COPY_LAYOUTS = [
+    ("1", None,      1, 1),
+    ("2", "Along X", 2, 1),
+    ("2", "Along Y", 1, 2),
+    ("4", None,      2, 2),
+]
+
+
+def _copy_layout_to_cols_rows(copies_label, arrangement):
+    for lbl, arr, cols, rows in SEGMENT_COPY_LAYOUTS:
+        if lbl == copies_label and (arr is None or arr == arrangement):
+            return cols, rows
+    return 1, 1
+
+
+def _cols_rows_to_copy_layout(cols, rows):
+    for lbl, arr, c, r in SEGMENT_COPY_LAYOUTS:
+        if (c, r) == (cols, rows):
+            return lbl, arr
+    return "1", None
+
 
 def _mesh_frustum(R: float, r: float, h: float, z0: float, N: int = 60):
     """
@@ -215,14 +240,12 @@ def _seed_segments(segments: list[dict]) -> None:
     for i, seg in enumerate(segments):
         st.session_state[f"eb_type_sel_{i}"] = SHAPES[seg["type"]]
         cols, rows = seg.get("cols", 1), seg.get("rows", 1)
-        st.session_state.pop(f"eb_arrange_{i}", None)
-        if cols * rows == 4:
-            st.session_state[f"eb_copies_{i}"] = "4"
-        elif cols * rows == 2:
-            st.session_state[f"eb_copies_{i}"] = "2"
-            st.session_state[f"eb_arrange_{i}"] = "Along X" if cols == 2 else "Along Y"
+        copies_label, arrangement = _cols_rows_to_copy_layout(cols, rows)
+        st.session_state[f"eb_copies_{i}"] = copies_label
+        if arrangement is not None:
+            st.session_state[f"eb_arrange_{i}"] = arrangement
         else:
-            st.session_state[f"eb_copies_{i}"] = "1"
+            st.session_state.pop(f"eb_arrange_{i}", None)
         for k, v in seg.items():
             if k not in ("type", "cols", "rows"):
                 st.session_state[f"eb_{k}_{i}"] = float(v)
@@ -257,10 +280,22 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("### Load Previous Run")
     uploaded = st.file_uploader("Upload a saved JSON file", type=["json"], label_visibility="collapsed")
-    if uploaded is not None:
+    if uploaded is not None and uploaded.file_id != st.session_state.get("_loaded_run_file_id"):
         try:
             data = json.loads(uploaded.read())
             st.session_state["loaded_run"] = data
+            st.session_state["_loaded_run_file_id"] = uploaded.file_id
+            st.session_state["_show_loaded_banner"] = True
+            # Seed the Enclosure Geometry segment builder here, once, at upload
+            # time — not on every rerun (see the persistent `loaded` read below).
+            _geo = (data.get("inputs") or {}).get("geometry")
+            if _geo:
+                st.session_state["eg_mode"] = _geo["mode"]
+                st.session_state["eb_unit"] = "m"  # segments are persisted in SI
+                if _geo["mode"] == "Donaldson" and _geo.get("donaldson_family") and _geo.get("donaldson_model"):
+                    st.session_state["eg_family"] = _geo["donaldson_family"]
+                    st.session_state["eg_model"]  = _geo["donaldson_model"]
+                _seed_segments(_geo["segments"])
             st.rerun()
         except Exception:
             st.error("Could not parse JSON file.")
@@ -268,16 +303,13 @@ with st.sidebar:
     st.page_link("app.py", label="← Home")
 
 # ── Pre-fill from loaded run ───────────────────────────────────────────────────
-loaded = st.session_state.pop("loaded_run", None)
-
-if loaded and (loaded.get("inputs") or {}).get("geometry"):
-    _geo = loaded["inputs"]["geometry"]
-    st.session_state["eg_mode"] = _geo["mode"]
-    st.session_state["eb_unit"] = "m"  # segments are persisted in SI; _seed_segments expects SI
-    if _geo["mode"] == "Donaldson" and _geo.get("donaldson_family") and _geo.get("donaldson_model"):
-        st.session_state["eg_family"] = _geo["donaldson_family"]
-        st.session_state["eg_model"]  = _geo["donaldson_model"]
-    _seed_segments(_geo["segments"])
+# Read (not pop!) — every input widget's `value=_pre(...)` needs this to stay
+# stable across every rerun for the rest of the session, not just the first one
+# after upload. Popping it here made `_pre()` silently fall back to hardcoded
+# defaults on the very next rerun (i.e. the moment the user edited any field),
+# which — since none of these widgets have an explicit `key=` — made Streamlit
+# treat the changed `value=` as a brand-new widget and discard the edit.
+loaded = st.session_state.get("loaded_run", None)
 
 def _pre(key: str, default):
     if loaded is None:
@@ -325,6 +357,12 @@ def _label(container, text, tip=None, tip_img=None):
         return
     container.write(text)
 
+
+def _warn_ld(value):
+    if value > 6.0:
+        st.warning(f"L/D = {value:.2f} exceeds 6.0 — outside NFPA 68 §8.1.1 scope. "
+                   "Verify applicability with your engineer of record.")
+
 # ── CSS ───────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
@@ -353,7 +391,7 @@ st.markdown("""
 st.title("Dust Deflagration Vent Sizing")
 st.caption("NFPA 68 (2023) · Chapter 8 · §8.2 – §8.5")
 
-if loaded:
+if st.session_state.pop("_show_loaded_banner", False):
     st.success(f"Loaded: **{loaded.get('meta', {}).get('label', '—')}** — form pre-filled.")
 
 st.markdown("---")
@@ -396,42 +434,38 @@ geom_mode = st.selectbox(
 
 _reseed = geom_mode != _prev_geom_mode
 
+donaldson_family, donaldson_model = None, None
+
 if geom_mode == "Donaldson":
     families = list_families()
     _prev_family = st.session_state.get("eg_family", families[0])
-    family = st.selectbox(
+    donaldson_family = st.selectbox(
         "Family", families,
         index=families.index(_prev_family) if _prev_family in families else 0,
     )
-    if family != _prev_family:
+    if donaldson_family != _prev_family:
         _reseed = True
 
-    models = list_models(family)
+    models = list_models(donaldson_family)
     _prev_model = st.session_state.get("eg_model", models[0])
-    model_name = st.selectbox(
+    donaldson_model = st.selectbox(
         "Model", models,
         index=models.index(_prev_model) if _prev_model in models else 0,
     )
-    if model_name != _prev_model:
+    if donaldson_model != _prev_model:
         _reseed = True
 
-    st.session_state["eg_family"] = family
-    st.session_state["eg_model"]  = model_name
+    st.session_state["eg_family"] = donaldson_family
+    st.session_state["eg_model"]  = donaldson_model
 
     if _reseed:
-        _seed_segments(get_model(family, model_name).segments)
+        _seed_segments(get_model(donaldson_family, donaldson_model).segments)
 
 elif geom_mode == "Circular Enclosure" and _reseed:
     _seed_segments(circular_enclosure_default())
 elif geom_mode == "Rectangular Enclosure" and _reseed:
     _seed_segments(rectangular_enclosure_default())
 st.session_state["eg_mode"] = geom_mode
-
-# Capture the Donaldson identity before `family` gets reused below for the
-# cross-section shape family (circular/square/rectangular).
-donaldson_family, donaldson_model = (
-    (family, model_name) if geom_mode == "Donaldson" else (None, None)
-)
 
 if _reseed:
     st.rerun()
@@ -450,9 +484,7 @@ if geom_mode == "Manual Input":
     LD = ic.number_input("L/D ratio [—]", label_visibility="collapsed",
                          value=float(_pre("enclosure.LD", 1.0)),
                          min_value=1.0, step=0.1, format="%.2f")
-    if LD > 6.0:
-        st.warning(f"L/D = {LD:.2f} exceeds 6.0 — outside NFPA 68 §8.1.1 scope. "
-                   "Verify applicability with your engineer of record.")
+    _warn_ld(LD)
 
 else:
     if "eb_seg_types" not in st.session_state:
@@ -548,6 +580,7 @@ else:
                 help="Identical copies of this segment arranged side by side "
                      "(e.g. multiple hoppers under one shared body).",
             )
+            arrangement = None
             if copies_label == "2":
                 arrange_opts = ["Along X", "Along Y"]
                 arrangement = cc2.radio(
@@ -555,11 +588,7 @@ else:
                     index=arrange_opts.index(st.session_state.get(f"eb_arrange_{i}", "Along X")),
                     key=f"eb_arrange_{i}", horizontal=True,
                 )
-                cols_n, rows_n = (2, 1) if arrangement == "Along X" else (1, 2)
-            elif copies_label == "4":
-                cols_n, rows_n = 2, 2
-            else:
-                cols_n, rows_n = 1, 1
+            cols_n, rows_n = _copy_layout_to_cols_rows(copies_label, arrangement)
             params["cols"], params["rows"] = cols_n, rows_n
 
             vol_si = segment_volume(params)
@@ -627,11 +656,7 @@ else:
             ld_final = ch6_ld_ratio(L_si, Dhe_si)
             st.metric("L/D", f"{ld_final:.2f}")
 
-            if ld_final > 6.0:
-                st.warning(
-                    f"L/D = {ld_final:.2f} exceeds 6.0 — outside NFPA 68 §8.1.1 scope. "
-                    "Verify applicability with your engineer of record."
-                )
+            _warn_ld(ld_final)
 
         with geom_right:
             fig = _build_3d_figure(seg_params)
@@ -659,11 +684,11 @@ with r1_left:
     st.caption("§8.1.1 — Scope: L/D ≤ 6")
 
     lc, ic = st.columns([1, 1], gap="small")
-    _label(lc, "Calculation type")
+    _label(lc, "Enclosure type")
     calc_variant = ic.selectbox(
-        "Calculation type",
+        "Enclosure type",
         ["Standard enclosure", "Dust collector (§8.7)"],
-        index=0 if _pre("calc_variant", "standard") == "standard" else 1,
+        index=1 if "Dust collector" in _pre("calc_variant", "Standard enclosure") else 0,
         label_visibility="collapsed",
     )
 
@@ -673,15 +698,12 @@ with r1_left:
         _label(lc, "Flexible filters above vent free end, no internal restraints?",
                "Applies 25% area increase per §8.7.2")
         flex_filters = ic.checkbox("Flexible filters above vent free end, no internal restraints?",
+                                   value=bool(_pre("flexible_filters", False)),
                                    label_visibility="collapsed")
 
     lc, ic = st.columns([1, 1], gap="small")
-    _label(lc, "Volume V [m³]", "Set above in Enclosure Geometry")
-    ic.markdown(f"`{V:.4f} m³`")
-
-    lc, ic = st.columns([1, 1], gap="small")
-    _label(lc, "L/D ratio [—]", "Set above in Enclosure Geometry")
-    ic.markdown(f"`{LD:.2f}`")
+    _label(lc, "Volume V · L/D ratio", "Set above in Enclosure Geometry")
+    ic.markdown(f"`{V:.4f} m³ · {LD:.2f}`")
 
     lc, ic = st.columns([1, 1], gap="small")
     _label(lc, "Solid volume [m³]", "Volume of solid objects inside (§8.4.1)")
@@ -833,23 +855,30 @@ with r3_left:
     turb_inputs = None
     if "Process" in turb_label:
         turb_mode = TurbulenceMode.PROCESS
+        ti = _pre("turb_inputs", {}) or {}
 
         lc, ic = st.columns([1, 1], gap="small")
         _label(lc, "Flow rate Q [m³/s]")
         Q_flow = ic.number_input("Flow rate Q [m³/s]", label_visibility="collapsed",
-                                 value=0.5, min_value=0.001, step=0.05, format="%.3f")
+                                 value=float(ti.get("Q", 0.5)), min_value=0.001, step=0.05, format="%.3f")
 
         lc, ic = st.columns([1, 1], gap="small")
         _label(lc, "Cross-sect. area A [m²]")
         A_flow = ic.number_input("Cross-sect. area A [m²]", label_visibility="collapsed",
-                                 value=0.5, min_value=0.001, step=0.05, format="%.3f")
+                                 value=float(ti.get("A", 0.5)), min_value=0.001, step=0.05, format="%.3f")
 
         Ain = None
-        if st.checkbox("Tangential inlet?"):
+        ain_prev = ti.get("Ain")
+        lc, ic = st.columns([1, 1], gap="small")
+        _label(lc, "Tangential inlet?")
+        tangential_inlet = ic.toggle("Tangential inlet?", value=(ain_prev is not None),
+                                     label_visibility="collapsed")
+        if tangential_inlet:
             lc, ic = st.columns([1, 1], gap="small")
             _label(lc, "Inlet area Ain [m²]")
             Ain = ic.number_input("Inlet area Ain [m²]", label_visibility="collapsed",
-                                  value=0.1, min_value=0.001, step=0.01, format="%.3f")
+                                  value=float(ain_prev) if ain_prev is not None else 0.1,
+                                  min_value=0.001, step=0.01, format="%.3f")
         turb_inputs = TurbulenceInputs(Q=Q_flow, A=A_flow, Ain=Ain)
     elif "Building" in turb_label:
         turb_mode = TurbulenceMode.BUILDING
@@ -861,77 +890,66 @@ with r3_right:
     st.subheader("Partial Volume")
     st.caption("§8.4 — Optional")
 
+    pvd = _pre("partial_volume", {}) or {}
+
+    def _pv(key, default):
+        v = pvd.get(key)
+        return default if v is None else v
+
     lc, ic = st.columns([1, 1], gap="small")
     _label(lc, "Apply partial volume correction?")
     use_pv = ic.toggle("Apply partial volume correction?", label_visibility="collapsed",
-                       value=False, disabled=(Pinitial > 0.2))
+                       value=bool(pvd), disabled=(Pinitial > 0.2))
     pv_obj = None
 
     if use_pv and Pinitial <= 0.2:
-        pv_type = st.radio("Method", ["Process enclosure (§8.4.1)", "Building (§8.4.5)"], horizontal=True)
+        pv_type = st.radio("Method", ["Process enclosure (§8.4.1)", "Building (§8.4.5)"], horizontal=True,
+                           index=1 if _pv("use_building", False) else 0)
         if "Process" in pv_type:
             lc, ic = st.columns([1, 1], gap="small")
             _label(lc, "Suspended dust Me [g]")
             Me = ic.number_input("Suspended dust Me [g]", label_visibility="collapsed",
-                                 value=5000.0, min_value=0.0, step=100.0)
+                                 value=float(_pv("Me", 5000.0)), min_value=0.0, step=100.0)
 
             lc, ic = st.columns([1, 1], gap="small")
             _label(lc, "Worst-case conc. cw [g/m³]", "Use 200 if not measured (§8.4.2.2)")
             cw = ic.number_input("Worst-case conc. cw [g/m³]", label_visibility="collapsed",
-                                 value=200.0, min_value=1.0, step=10.0)
+                                 value=float(_pv("cw", 200.0)), min_value=1.0, step=10.0)
             pv_obj = PartialVolumeInputs(Me=Me, cw=cw)
         else:
             st.info("Supply building entrainment data:")
 
-            lc, ic = st.columns([1, 1], gap="small")
-            _label(lc, "Avg floor mass [g]")
-            Mf_bar = ic.number_input("Avg floor mass [g]", label_visibility="collapsed",
-                                     value=10.0, min_value=0.0)
+            st.caption("**Floor**")
+            f1, f2 = st.columns(2)
+            Mf_bar = f1.number_input("Avg floor mass [g]",
+                                     value=float(_pv("Mf_bar", 10.0)), min_value=0.0)
+            Af_dusty = f2.number_input("Dusty floor area [m²]",
+                                       value=float(_pv("Af_dusty", 50.0)), min_value=0.0)
+            f3, f4 = st.columns(2)
+            eta_Df = f3.number_input("Floor entrainment ηD [—]",
+                                     value=float(_pv("eta_Dfloor", 0.5)), min_value=0.0, max_value=1.0)
+            Afs = f4.number_input("Floor sample area [m²]",
+                                  value=float(_pv("Afs", 0.09)), min_value=0.001, format="%.4f")
 
-            lc, ic = st.columns([1, 1], gap="small")
-            _label(lc, "Dusty floor area [m²]")
-            Af_dusty = ic.number_input("Dusty floor area [m²]", label_visibility="collapsed",
-                                       value=50.0, min_value=0.0)
+            st.caption("**Surface**")
+            s1, s2 = st.columns(2)
+            Ms_bar = s1.number_input("Avg surface mass [g]",
+                                     value=float(_pv("Ms_bar", 5.0)), min_value=0.0)
+            Asur = s2.number_input("Total surface area [m²]",
+                                   value=float(_pv("Asur", 20.0)), min_value=0.0)
+            s3, s4 = st.columns(2)
+            eta_Ds = s3.number_input("Surface ηD [—]",
+                                     value=float(_pv("eta_Dsur", 0.3)), min_value=0.0, max_value=1.0)
+            Ass = s4.number_input("Surface sample area [m²]",
+                                  value=float(_pv("Ass", 0.09)), min_value=0.001, format="%.4f")
 
-            lc, ic = st.columns([1, 1], gap="small")
-            _label(lc, "Floor entrainment ηD [—]")
-            eta_Df = ic.number_input("Floor entrainment ηD [—]", label_visibility="collapsed",
-                                     value=0.5, min_value=0.0, max_value=1.0)
-
-            lc, ic = st.columns([1, 1], gap="small")
-            _label(lc, "Floor sample area [m²]")
-            Afs = ic.number_input("Floor sample area [m²]", label_visibility="collapsed",
-                                  value=0.09, min_value=0.001, format="%.4f")
-
-            lc, ic = st.columns([1, 1], gap="small")
-            _label(lc, "Avg surface mass [g]")
-            Ms_bar = ic.number_input("Avg surface mass [g]", label_visibility="collapsed",
-                                     value=5.0, min_value=0.0)
-
-            lc, ic = st.columns([1, 1], gap="small")
-            _label(lc, "Total surface area [m²]")
-            Asur = ic.number_input("Total surface area [m²]", label_visibility="collapsed",
-                                   value=20.0, min_value=0.0)
-
-            lc, ic = st.columns([1, 1], gap="small")
-            _label(lc, "Surface ηD [—]")
-            eta_Ds = ic.number_input("Surface ηD [—]", label_visibility="collapsed",
-                                     value=0.3, min_value=0.0, max_value=1.0)
-
-            lc, ic = st.columns([1, 1], gap="small")
-            _label(lc, "Surface sample area [m²]")
-            Ass = ic.number_input("Surface sample area [m²]", label_visibility="collapsed",
-                                  value=0.09, min_value=0.001, format="%.4f")
-
-            lc, ic = st.columns([1, 1], gap="small")
-            _label(lc, "Equipment dust Me [g]")
-            Me_eq = ic.number_input("Equipment dust Me [g]", label_visibility="collapsed",
-                                    value=0.0, min_value=0.0)
-
-            lc, ic = st.columns([1, 1], gap="small")
-            _label(lc, "Worst-case conc. cw [g/m³]", "Use 200 if not measured (§8.4.2.2)")
-            cw_b = ic.number_input("Worst-case conc. cw [g/m³]", label_visibility="collapsed",
-                                   value=200.0, min_value=1.0)
+            st.caption("**Equipment**")
+            e1, e2 = st.columns(2)
+            Me_eq = e1.number_input("Equipment dust Me [g]",
+                                    value=float(_pv("Me_equipment", 0.0)), min_value=0.0)
+            cw_b = e2.number_input("Worst-case conc. cw [g/m³]",
+                                   value=float(_pv("cw", 200.0)), min_value=1.0,
+                                   help="Use 200 if not measured (§8.4.2.2)")
 
             pv_obj = PartialVolumeInputs(
                 use_building=True,
@@ -989,28 +1007,65 @@ if run_calc or "last_result" in st.session_state:
     # ── Results ───────────────────────────────────────────────────────────────
     st.markdown("## Results")
 
+    final_caption = (
+        "Final value after all applicable corrections, including the 25% "
+        "flexible-filter obstruction increase · NFPA 68 (2023) §8.5, §8.7.2"
+        if result.flexible_filters_bump_active else
+        "Final value after all applicable corrections · NFPA 68 (2023) §8.5"
+    )
     st.markdown(f"""
     <div class="result-banner">
       <div style="font-size:0.82em;opacity:0.65;letter-spacing:0.05em">
-        MINIMUM REQUIRED VENT AREA  A<sub>vf</sub>
+        MINIMUM REQUIRED VENT AREA
       </div>
       <div style="font-size:2.4em;font-weight:800;color:#E8503A;line-height:1.1">
-        {result.Avf:.4f}
+        {result.Av_final:.4f}
         <span style="font-size:0.45em;font-weight:400">m²</span>
       </div>
       <div style="font-size:0.8em;opacity:0.55;margin-top:4px">
-        Final value after all applicable corrections · NFPA 68 (2023) §8.5
+        {final_caption}
       </div>
     </div>
     """, unsafe_allow_html=True)
 
-    # Calculation chain table
+    # Calculation chain table — merged with per-row correction detail
     st.markdown("### Calculation Chain")
-    headers = st.columns([1.5, 2, 2, 3])
-    headers[0].markdown("**Symbol**")
-    headers[1].markdown("**Value**")
-    headers[2].markdown("**Change**")
-    headers[3].markdown("**Description & Reference**")
+
+    def _chain_detail(sym: str) -> str:
+        if sym == "Av₀":
+            regime = result.pressure_regime.name.replace("_", " ").title()
+            if result.Peffective is not None:
+                return (f"{regime} · Peff={result.Peffective:.4f} bar-g, "
+                        f"PEmax={result.PEmax:.4f} bar-g, Π={result.Pi_effective:.4f}")
+            return regime
+        if sym == "Av₁":
+            return "L/D: Active" if result.ld_correction_active else "L/D: Not applied"
+        if sym == "Av₂":
+            mode = result.turbulence_mode.name
+            if mode == "PROCESS":
+                vtan_str = f"{result.vtan:.2f} m/s" if result.vtan is not None else "n/a"
+                return f"Process · vaxial={result.vaxial:.2f} m/s, vtan={vtan_str}"
+            if mode == "BUILDING":
+                return "Building (1.7×, §8.2.4.7)"
+            return "None"
+        if sym == "Av₃":
+            state = "Active" if result.panel_inertia_active else "Not applied"
+            return f"Panel inertia: {state} (MT={result.MT:.3f} kg/m²)"
+        if sym == "Av₄":
+            if result.Xr is None:
+                return "—"
+            state = "Active" if result.partial_volume_active else "Not applied"
+            return f"Partial volume: {state} (Xr={result.Xr:.4f})"
+        if sym == "Avf":
+            if not result.duct_active:
+                return "No duct"
+            base = f"E1={result.E1:.4f}, E2={result.E2:.4f}"
+            if result.ddt_ok:
+                return f"{base} · DDT ✓"
+            return f"{base} · <b>DDT ✗ FAILED</b> — Leff_max={result.Leff_max:.3f} m"
+        if sym == "Av,final":
+            return "Avf × 1.25"
+        return ""
 
     steps_data = [
         ("Av₀", result.Av0, "Minimum vent area",               "§8.2.1, Eq. 8.2.1.1"),
@@ -1020,50 +1075,56 @@ if run_calc or "last_result" in st.session_state:
         ("Av₄", result.Av4, "After partial volume correction", "§8.4, Eq. 8.4.3"),
         ("Avf", result.Avf, "Final vent area (with duct §8.5)","§8.5.1, Eq. 8.5.1a"),
     ]
+    if result.flexible_filters_bump_active:
+        steps_data.append((
+            "Av,final", result.Av_final,
+            "Flexible filter obstruction increase (+25%)", "§8.7.2",
+        ))
+
+    ddt_failed = result.duct_active and not result.ddt_ok
+    rows_html = ""
     prev = None
-    for sym, val, desc, ref in steps_data:
-        c0, c1, c2, c3 = st.columns([1.5, 2, 2, 3])
-        c0.markdown(f"**{sym}**")
-        c1.markdown(f"`{val:.4f} m²`")
+    for i, (sym, val, desc, ref) in enumerate(steps_data):
         if prev is not None and prev > 0:
             pct = (val - prev) / prev * 100
             color = "#C8392B" if pct > 0.01 else ("#1A7A4A" if pct < -0.01 else "#6B7280")
             arrow = "↑" if pct > 0.01 else ("↓" if pct < -0.01 else "=")
-            c2.markdown(f"<span style='color:{color}'>{arrow} {pct:+.1f}%</span>", unsafe_allow_html=True)
+            change_html = f"<span style='color:{color}'>{arrow} {pct:+.1f}%</span>"
         else:
-            c2.markdown("—")
-        c3.markdown(f"{desc}  <span class='ref-tag'>{ref}</span>", unsafe_allow_html=True)
+            change_html = "—"
+
+        danger = (sym == "Avf" and ddt_failed)
+        bg = "#F2D7D5" if danger else ("#F7F8FA" if i % 2 == 0 else "#fff")
+        detail_style = "color:#B3261E;font-weight:700" if danger else "color:#374151"
+
+        rows_html += f"""
+        <tr style="background:{bg}">
+          <td style="padding:6px 10px;font-weight:700">{sym}</td>
+          <td style="padding:6px 10px;font-family:monospace">{val:.4f} m²</td>
+          <td style="padding:6px 10px">{change_html}</td>
+          <td style="padding:6px 10px;font-size:0.9em;{detail_style}">{_chain_detail(sym)}</td>
+          <td style="padding:6px 10px;font-size:0.9em">{desc}
+            <span style="color:#6B7280;font-size:0.85em">{ref}</span></td>
+        </tr>"""
         prev = val
 
-    # Detail metrics
-    st.markdown("### Correction Details")
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Pressure Regime",  result.pressure_regime.name.replace("_", " ").title())
-    m2.metric("L/D Correction",   "Active" if result.ld_correction_active else "Not applied")
-    m3.metric("Panel Inertia MT", f"{result.MT:.3f} kg/m²")
-    m4.metric("Panel Inertia",    "Active" if result.panel_inertia_active else "Not applied")
-
-    if result.Xr is not None:
-        x1, x2, _, _ = st.columns(4)
-        x1.metric("Fill Fraction Xr", f"{result.Xr:.4f}")
-        x2.metric("Partial Volume",    "Active" if result.partial_volume_active else "Not applied")
-
-    if result.duct_active:
-        st.markdown("**Duct correction (§8.5):**")
-        d1, d2, d3, d4 = st.columns(4)
-        d1.metric("E1",           f"{result.E1:.4f}")
-        d2.metric("E2",           f"{result.E2:.4f}")
-        d3.metric("Leff_max",     f"{result.Leff_max:.3f} m")
-        d4.metric("DDT (§8.5.9)", "✓ Pass" if result.ddt_ok else "✗ FAIL")
-        if not result.ddt_ok:
-            st.error("DDT limit exceeded. Reduce duct length or increase Pred. (§8.5.9)")
-
-    if result.Peffective is not None:
-        st.markdown("**Elevated/subatmospheric intermediates (§8.2.1.2):**")
-        e1, e2, e3 = st.columns(3)
-        e1.metric("Peffective",  f"{result.Peffective:.4f} bar-g")
-        e2.metric("PEmax",       f"{result.PEmax:.4f} bar-g")
-        e3.metric("Π effective", f"{result.Pi_effective:.4f}")
+    st.markdown(f"""
+    <div style="overflow-x:auto">
+    <table style="width:100%;border-collapse:collapse;font-size:0.92em">
+      <thead>
+        <tr style="border-bottom:2px solid #1B2A3B">
+          <th style="padding:6px 10px;text-align:left;width:8%">Symbol</th>
+          <th style="padding:6px 10px;text-align:left;width:13%">Value</th>
+          <th style="padding:6px 10px;text-align:left;width:10%">Change</th>
+          <th style="padding:6px 10px;text-align:left;width:32%">Correction Details</th>
+          <th style="padding:6px 10px;text-align:left;width:37%">Description &amp; Reference</th>
+        </tr>
+      </thead>
+      <tbody>{rows_html}
+      </tbody>
+    </table>
+    </div>
+    """, unsafe_allow_html=True)
 
     # ── Selection ─────────────────────────────────────────────────────────────
     st.markdown("---")
@@ -1073,15 +1134,17 @@ if run_calc or "last_result" in st.session_state:
     fc0, fc1, fc2, fc3 = st.columns([1, 1, 1, 1.1])
 
     all_manufacturers = list_manufacturers()
-    _prev_manufacturers = st.session_state.get(
-        "sel_manufacturers", _pre("selection.filter_manufacturers", all_manufacturers)
-    )
     sel_manufacturers = fc0.multiselect(
         "Manufacturer (filter)", all_manufacturers,
-        default=[m for m in _prev_manufacturers if m in all_manufacturers] or all_manufacturers,
+        default=[m for m in _pre("selection.filter_manufacturers", all_manufacturers)
+                 if m in all_manufacturers] or all_manufacturers,
+        key="sel_manufacturers",
     )
-    st.session_state["sel_manufacturers"] = sel_manufacturers
 
+    # Panel type's option list depends on the manufacturer selection above, so it
+    # can't use the key= shortcut the other two widgets use here (Streamlit only
+    # honors `default=` on a keyed widget's very first render) — it needs a fresh
+    # default recomputed against the current option list on every rerun instead.
     all_panel_types = sorted({pt for m in (sel_manufacturers or all_manufacturers) for pt in list_vent_panel_types(m)})
     _prev_panel_types = st.session_state.get(
         "sel_panel_types", _pre("selection.filter_panel_types", all_panel_types)
@@ -1101,19 +1164,19 @@ if run_calc or "last_result" in st.session_state:
 
     stocked_only = fc3.toggle(
         "Stocked sizes only",
-        value=st.session_state.get("sel_stocked_only", bool(_pre("selection.stocked_only", True))),
+        value=bool(_pre("selection.stocked_only", True)),
+        key="sel_stocked_only",
         help="Limit to nominal sizes normally kept in stock. Turn off to see the full manufacturer range.",
     )
-    st.session_state["sel_stocked_only"] = stocked_only
 
     selection_rows = (
-        compute_panel_selection(result.Avf, sel_manufacturers, sel_panel_types, efficiency, stocked_only=stocked_only)
+        compute_panel_selection(result.Av_final, sel_manufacturers, sel_panel_types, efficiency, stocked_only=stocked_only)
         if sel_manufacturers and sel_panel_types else []
     )
     selection_dict = None
 
     st.caption(
-        f"Avf = {result.Avf:.4f} m² · Efficiency = {efficiency_pct:.0f}% · "
+        f"Design area = {result.Av_final:.4f} m² · Efficiency = {efficiency_pct:.0f}% · "
         f"{'stocked sizes only' if stocked_only else 'full manufacturer range'} · "
         f"sorted by panels required"
     )
