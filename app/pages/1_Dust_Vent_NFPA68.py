@@ -13,9 +13,9 @@ import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
 
-from core.geometry import (
-    segment_volume, enclosure_volume_and_length, enclosure_hydraulic_diameter,
-    largest_cross_section,
+from core.geometry import segment_volume, enclosure_volume_and_length
+from explosion_protection.nfpa_68_ch6_orchestrator import (
+    enclosure_hydraulic_diameter, largest_cross_section,
 )
 from core.enclosure_catalog import (
     circular_enclosure_default, rectangular_enclosure_default,
