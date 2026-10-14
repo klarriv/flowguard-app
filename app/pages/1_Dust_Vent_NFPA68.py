@@ -1136,7 +1136,7 @@ if run_calc or "last_result" in st.session_state:
     all_manufacturers = list_manufacturers()
     sel_manufacturers = fc0.multiselect(
         "Manufacturer (filter)", all_manufacturers,
-        default=[m for m in _pre("selection.filter_manufacturers", all_manufacturers)
+        default=[m for m in _pre("selection.filter_manufacturers", ["Vigilex"])
                  if m in all_manufacturers] or all_manufacturers,
         key="sel_manufacturers",
     )
@@ -1147,7 +1147,7 @@ if run_calc or "last_result" in st.session_state:
     # default recomputed against the current option list on every rerun instead.
     all_panel_types = sorted({pt for m in (sel_manufacturers or all_manufacturers) for pt in list_vent_panel_types(m)})
     _prev_panel_types = st.session_state.get(
-        "sel_panel_types", _pre("selection.filter_panel_types", all_panel_types)
+        "sel_panel_types", _pre("selection.filter_panel_types", ["Vacuum"])
     )
     sel_panel_types = fc1.multiselect(
         "Panel Type (filter)", all_panel_types,
@@ -1157,11 +1157,16 @@ if run_calc or "last_result" in st.session_state:
 
     efficiency_pct = fc2.number_input(
         "Efficiency [%]", min_value=1.0, max_value=100.0,
-        value=float(_pre("selection.efficiency_pct", 70.0)),
+        value=float(_pre("selection.efficiency_pct", 100.0)),
         step=1.0, format="%.0f",
     )
     efficiency = efficiency_pct / 100.0
 
+    shape_filter = fc3.radio(
+        "Shape", ["Rectangular", "Round"], horizontal=True,
+        index=0 if _pre("selection.filter_shape", "Rectangular") == "Rectangular" else 1,
+        key="sel_shape",
+    )
     stocked_only = fc3.toggle(
         "Stocked sizes only",
         value=bool(_pre("selection.stocked_only", True)),
@@ -1169,14 +1174,17 @@ if run_calc or "last_result" in st.session_state:
         help="Limit to nominal sizes normally kept in stock. Turn off to see the full manufacturer range.",
     )
 
+    shape_key = "rectangular" if shape_filter == "Rectangular" else "round"
     selection_rows = (
-        compute_panel_selection(result.Av_final, sel_manufacturers, sel_panel_types, efficiency, stocked_only=stocked_only)
+        [r for r in compute_panel_selection(result.Av_final, sel_manufacturers, sel_panel_types, efficiency, stocked_only=stocked_only)
+         if r.panel.shape == shape_key]
         if sel_manufacturers and sel_panel_types else []
     )
     selection_dict = None
 
     st.caption(
         f"Design area = {result.Av_final:.4f} m² · Efficiency = {efficiency_pct:.0f}% · "
+        f"{shape_filter.lower()} · "
         f"{'stocked sizes only' if stocked_only else 'full manufacturer range'} · "
         f"sorted by panels required"
     )
@@ -1199,10 +1207,18 @@ if run_calc or "last_result" in st.session_state:
                 {
                     "Manufacturer": row.panel.manufacturer,
                     "Model": row.panel.model,
+                    "Rated Vacuum (mbar)": (
+                        row.panel.rated_vacuum_mbar if row.panel.rated_vacuum_mbar is not None else "—"
+                    ),
                     "Nominal (metric)": row.panel.nominal_metric,
                     "Nominal (imperial)": row.panel.nominal_imperial,
+                    "Exterior (metric)": row.panel.exterior_metric,
+                    "Exterior (imperial)": row.panel.exterior_imperial,
                     "Vent Area (m²)": round(row.panel.surf_m2, 4),
-                    "Panel Density (kg/m²)": round(row.panel.panel_density_kgm2, 3),
+                    "Panel Density (kg/m²)": (
+                        round(row.panel.panel_density_kgm2, 3)
+                        if row.panel.panel_density_kgm2 is not None else "—"
+                    ),
                     "Panels Required": row.panels_required,
                     "Total Effective Area (m²)": round(row.total_effective_area_m2, 4),
                 }
@@ -1229,8 +1245,11 @@ if run_calc or "last_result" in st.session_state:
             "manufacturer":            chosen.panel.manufacturer,
             "panel_type":              chosen.panel.panel_type,
             "model":                   chosen.panel.model,
+            "rated_vacuum_mbar":       chosen.panel.rated_vacuum_mbar,
             "nominal_metric":          chosen.panel.nominal_metric,
             "nominal_imperial":        chosen.panel.nominal_imperial,
+            "exterior_metric":         chosen.panel.exterior_metric,
+            "exterior_imperial":       chosen.panel.exterior_imperial,
             "vent_area_m2":            chosen.panel.surf_m2,
             "panel_density_kgm2":      chosen.panel.panel_density_kgm2,
             "efficiency_pct":          efficiency_pct,
@@ -1238,12 +1257,14 @@ if run_calc or "last_result" in st.session_state:
             "total_effective_area_m2": chosen.total_effective_area_m2,
             "filter_manufacturers":    sel_manufacturers,
             "filter_panel_types":      sel_panel_types,
+            "filter_shape":            shape_filter,
             "stocked_only":            stocked_only,
         }
     elif sel_manufacturers and sel_panel_types:
         st.info(
-            "No panels match this manufacturer/type combination with the current filters. "
-            + ("Try turning off \"Stocked sizes only\"." if stocked_only else "")
+            "No panels match this manufacturer/type/shape combination with the current filters. "
+            + ("Try turning off \"Stocked sizes only\" or switching the shape filter."
+               if stocked_only else "Try switching the shape filter.")
         )
     else:
         st.info("Select at least one manufacturer and panel type to see vent panel options.")

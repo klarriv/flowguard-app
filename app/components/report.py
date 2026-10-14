@@ -298,12 +298,15 @@ def _build_html(run: dict, logo_path: Optional[str] = None) -> str:
         sr = (
             _row("Manufacturer",              sel.get("manufacturer", "—"), "") +
             _row("Model",                     sel.get("model", "—"),        "", alt=True) +
-            _row("Panel type",                sel.get("panel_type", "—"),   "") +
-            _row("Nominal (metric)",          sel.get("nominal_metric", "—"),   "", alt=True) +
-            _row("Nominal (imperial)",        sel.get("nominal_imperial", "—"), "") +
-            _row("Vent area",                 f"{_fmt(sel.get('vent_area_m2'), 4)} m²",        "", alt=True) +
-            _row("Panel density",             f"{_fmt(sel.get('panel_density_kgm2'), 3)} kg/m²","") +
-            _row("Efficiency",                f"{_fmt(sel.get('efficiency_pct'), 0)}%",         "", alt=True) +
+            _row("Rated vacuum (§100mbar)",   f"{_fmt(sel.get('rated_vacuum_mbar'), 0)} mbar" if sel.get("rated_vacuum_mbar") is not None else "—", "") +
+            _row("Panel type",                sel.get("panel_type", "—"),   "", alt=True) +
+            _row("Nominal (metric)",          sel.get("nominal_metric", "—"),   "") +
+            _row("Nominal (imperial)",        sel.get("nominal_imperial", "—"), "", alt=True) +
+            _row("Exterior (metric)",         sel.get("exterior_metric", "—"),   "") +
+            _row("Exterior (imperial)",       sel.get("exterior_imperial", "—"), "", alt=True) +
+            _row("Vent area",                 f"{_fmt(sel.get('vent_area_m2'), 4)} m²",        "") +
+            _row("Panel density",             f"{_fmt(sel.get('panel_density_kgm2'), 3)} kg/m²","", alt=True) +
+            _row("Efficiency",                f"{_fmt(sel.get('efficiency_pct'), 0)}%",         "") +
             _row("Panels required",           f"{sel.get('panels_required', '—')} —",           "", highlight=True) +
             _row("Total effective vent area", f"{_fmt(sel.get('total_effective_area_m2'), 4)} m²", "", highlight=True)
         )
