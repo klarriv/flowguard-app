@@ -26,7 +26,7 @@ from core.vent_panel_catalog import (
     compute_panel_selection,
 )
 from explosion_protection.nfpa_68_ch6_equations import ld_ratio as ch6_ld_ratio
-from explosion_protection.nfpa_68_ch8_dust_vent import (
+from explosion_protection.nfpa_68_ch8_orchestrator import (
     Enclosure, Dust, Vent, Duct, TurbulenceInputs, PartialVolumeInputs,
     TurbulenceMode, SubatmosphericMethod,
     vent_area_dust, dust_collector_vent_area,
