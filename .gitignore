@@ -3,3 +3,6 @@ __pycache__/
 *.pyc
 .env
 .venv/
+
+# Reference material (workbooks, book PDFs); never commit
+docs_for_claude_code/
