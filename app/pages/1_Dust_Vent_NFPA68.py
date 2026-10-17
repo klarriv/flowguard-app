@@ -1290,40 +1290,42 @@ if run_calc or "last_result" in st.session_state:
 
     e1, e2 = st.columns(2)
 
+    from components.report import WEASYPRINT_OK, export_basename
+    fields_ok = bool(project_num and calc_label and engineer)
+    base_name = export_basename(payload["meta"])
+
     with e1:
-        json_bytes = json.dumps(payload, indent=2).encode()
-        filename   = f"{calc_label.replace(' ', '_') or 'calculation'}.json"
+        json_bytes = json.dumps(payload, indent=2).encode() if fields_ok else b""
         st.download_button(
             label="⬇ Download JSON",
             data=json_bytes,
-            file_name=filename,
+            file_name=f"{base_name}.json",
             mime="application/json",
             use_container_width=True,
+            disabled=not fields_ok,
         )
 
     with e2:
-        from components.report import WEASYPRINT_OK
         if not WEASYPRINT_OK:
             st.error("WeasyPrint not installed. Run: pip install weasyprint")
         else:
-            fields_ok = bool(project_num and calc_label and engineer)
             logo      = LOGO_PATH if Path(LOGO_PATH).exists() else None
             pdf_bytes = _make_pdf(json.dumps(payload), logo) if fields_ok else b""
-            pdf_name  = f"{calc_label.replace(' ', '_') or 'calculation'}.pdf"
             st.download_button(
                 label="⬇ Download PDF",
                 data=pdf_bytes,
-                file_name=pdf_name,
+                file_name=f"{base_name}.pdf",
                 mime="application/pdf",
                 use_container_width=True,
                 disabled=not fields_ok,
             )
-            if not fields_ok:
-                missing = [
-                    name for name, val in [
-                        ("Project number", project_num),
-                        ("Calculation label", calc_label),
-                        ("Engineer", engineer),
-                    ] if not val
-                ]
-                st.caption(f"Required to download PDF: {', '.join(missing)}")
+
+    if not fields_ok:
+        missing = [
+            name for name, val in [
+                ("Project number", project_num),
+                ("Calculation label", calc_label),
+                ("Engineer", engineer),
+            ] if not val
+        ]
+        st.caption(f"Required to download: {', '.join(missing)}")

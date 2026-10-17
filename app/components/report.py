@@ -20,16 +20,42 @@ except ImportError:
 
 # ── Colour palette ─────────────────────────────────────────────────────────────
 P = {
-    "primary":    "#1B2A3B",
-    "accent":     "#C8392B",
-    "accent_lt":  "#F2D7D5",
-    "rule":       "#D0D5DD",
+    "primary":    "#070E5E",   # template navy (headings, table headers)
+    "accent":     "#FF6F38",   # template orange (minor sub-heads, footer rule)
+    "accent_lt":  "#FFE9DF",
+    "rule":       "#DDDDDD",
     "pass":       "#1A7A4A",
     "fail":       "#C8392B",
-    "bg_alt":     "#F7F8FA",
-    "text":       "#1B2A3B",
-    "muted":      "#6B7280",
+    "bg_alt":     "#E8EAF6",   # Brand Table banding
+    "text":       "#333333",
+    "muted":      "#777777",
+    "footer":     "#AAAAAA",
 }
+
+FOOTER_TEXT = "Capt-Air \u2022 Confidential"
+EXPORT_TITLE = "NFPA 68 Dust Vent Calculation"
+_FORBIDDEN_FILENAME_CHARS = set('/\\:*?"<>|')
+
+
+def _safe_filename_part(text) -> str:
+    """Replace characters forbidden in file names with '_' (1:1, runs kept)."""
+    out = "".join(
+        "_" if (c in _FORBIDDEN_FILENAME_CHARS or ord(c) < 32) else c
+        for c in str(text or "")
+    )
+    return out.strip().strip(".").strip()
+
+
+def export_basename(meta: dict) -> str:
+    """'[date] - [project] - [calc label] - NFPA 68 Dust Vent Calculation'.
+    Date is the export date (meta.timestamp is stamped when the payload is built)."""
+    try:
+        date = datetime.fromisoformat(meta.get("timestamp", "")).strftime("%Y-%m-%d")
+    except ValueError:
+        date = datetime.now().strftime("%Y-%m-%d")
+    project = _safe_filename_part(meta.get("project")) or "NoProject"
+    label = _safe_filename_part(meta.get("label")) or "calculation"
+    return f"{date} - {project} - {label} - {EXPORT_TITLE}"
 
 
 def _logo_b64(logo_path: Optional[str]) -> Optional[str]:
@@ -56,9 +82,9 @@ def _row(label: str, value: str, ref: str = "", alt: bool = False, highlight: bo
     fw = "700" if highlight else "400"
     return (
         f'<tr style="background:{bg}">'
-        f'<td style="padding:6px 10px;font-weight:{fw};width:38%">{label}</td>'
-        f'<td style="padding:6px 10px;font-weight:{fw};font-family:monospace">{value}</td>'
-        f'<td style="padding:6px 10px;color:{P["muted"]};font-size:0.82em">{ref}</td>'
+        f'<td style="font-weight:700;color:{P["primary"]};width:38%">{label}</td>'
+        f'<td style="font-weight:{fw};font-family:monospace">{value}</td>'
+        f'<td style="color:{P["muted"]};font-size:0.85em">{ref}</td>'
         f'</tr>'
     )
 
@@ -76,10 +102,10 @@ def _chain_row(label: str, value: str, detail: str, ref: str,
         bg, border, fw = (P["bg_alt"] if alt else "#fff"), "", "400"
     return (
         f'<tr style="background:{bg};{border}">'
-        f'<td style="padding:6px 10px;font-weight:{fw};width:28%">{label}</td>'
-        f'<td style="padding:6px 10px;font-weight:{fw};font-family:monospace;width:12%">{value}</td>'
-        f'<td style="padding:6px 10px;font-size:0.85em;width:35%">{detail}</td>'
-        f'<td style="padding:6px 10px;color:{P["muted"]};font-size:0.82em;width:25%">{ref}</td>'
+        f'<td style="font-weight:700;color:{P["primary"]};width:28%">{label}</td>'
+        f'<td style="font-weight:{fw};font-family:monospace;width:12%">{value}</td>'
+        f'<td style="font-size:0.85em;width:35%">{detail}</td>'
+        f'<td style="color:{P["muted"]};font-size:0.85em;width:25%">{ref}</td>'
         f'</tr>'
     )
 
@@ -87,8 +113,13 @@ def _chain_row(label: str, value: str, detail: str, ref: str,
 def _subhead(text: str) -> str:
     return (
         f'<tr><td colspan="3" style="font-weight:700;background:{P["primary"]};'
-        f'color:#fff;padding:5px 10px">{text}</td></tr>'
+        f'color:#fff">{text}</td></tr>'
     )
+
+
+def _table(title: str, rows: str) -> str:
+    """Titled input sub-table (template Heading 2 style), kept on one page."""
+    return f'<div class="sub"><h3>{title}</h3><table>{rows}</table></div>'
 
 
 _SHAPE_LABELS = {
@@ -128,18 +159,16 @@ def _build_html(run: dict, logo_path: Optional[str] = None) -> str:
     geo   = inp.get("geometry")
 
     # Section numbers are computed rather than hardcoded so the optional
-    # sections (Geometry, Vent Panel Selection, Comments) don't leave a gap in
+    # sections (Geometry, Vent Panel Selection) don't leave a gap in
     # the numbering when omitted (e.g. Manual Input has no geometry). This list
     # mirrors the actual section order the sections are spliced into below, so
     # the numbering can't drift out of sync with where a section is rendered.
     has_selection = bool(sel and sel.get("model"))
-    has_comments  = bool(meta.get("comments"))
     section_order = [
         ("geometry",   bool(geo)),
         ("input",      True),
         ("chain",      True),
         ("selection",  has_selection),
-        ("comments",   has_comments),
     ]
     section_num = {}
     _n = 0
@@ -151,7 +180,6 @@ def _build_html(run: dict, logo_path: Optional[str] = None) -> str:
     input_num      = section_num["input"]
     chain_num      = section_num["chain"]
     selection_num  = section_num.get("selection")
-    comments_num   = section_num.get("comments")
 
     ts     = meta.get("timestamp", datetime.now().isoformat())
     ts_fmt = datetime.fromisoformat(ts).strftime("%B %d, %Y  %H:%M")
@@ -167,9 +195,9 @@ def _build_html(run: dict, logo_path: Optional[str] = None) -> str:
 
     logo_b64  = _logo_b64(logo_path)
     logo_html = (
-        f'<img src="{logo_b64}" style="height:52px;object-fit:contain">'
+        f'<img src="{logo_b64}" style="height:44px;object-fit:contain">'
         if logo_b64 else
-        f'<span style="font-size:1.3em;font-weight:800;color:#fff">'
+        f'<span style="font-size:1.3em;font-weight:800;color:{P["primary"]}">'
         f'{meta.get("project","")}</span>'
     )
 
@@ -248,13 +276,7 @@ def _build_html(run: dict, logo_path: Optional[str] = None) -> str:
             _row("Elbow losses Kelbows",       f"{_fmt(duct.get('Kelbows'), 2)} —","Fig. A.8.5(b)", alt=True) +
             _row("Outlet coefficient Koutlet", f"{_fmt(duct.get('Koutlet'), 2)} —","Fig. A.8.5(a)")
         )
-        duct_section = f"""
-        <h3 style="margin-top:24px;margin-bottom:8px;color:{P['primary']};
-                   font-size:0.9em;letter-spacing:0.06em;text-transform:uppercase">
-            Vent Duct Parameters — §8.5
-        </h3>
-        <table style="width:100%;border-collapse:collapse;font-size:0.88em">{dr}</table>
-        """
+        duct_section = _table("Vent Duct — §8.5", dr)
 
     # ── Optional enclosure geometry section (skipped for Manual Input) ────────
     geometry_section = ""
@@ -288,8 +310,8 @@ def _build_html(run: dict, logo_path: Optional[str] = None) -> str:
 
         geometry_section = f"""
         <h2>{geom_num} &middot; Enclosure Geometry</h2>
-        <table>{geo_summary_rows}</table>
-        <table style="margin-top:10px">{geo_seg_rows}</table>
+        <div class="sub"><table>{geo_summary_rows}</table></div>
+        <div class="sub"><table>{geo_seg_rows}</table></div>
         """
 
     # ── Optional vent panel selection section (final pick only) ───────────────
@@ -312,20 +334,31 @@ def _build_html(run: dict, logo_path: Optional[str] = None) -> str:
         )
         selection_section = f"""
         <h2>{selection_num} &middot; Vent Panel Selection</h2>
-        <table>{sr}</table>
+        <div class="sub"><table>{sr}</table></div>
         """
 
-    # ── Optional comments section ──────────────────────────────────────────────
-    comments_section = ""
+    # ── Comments (shown in the top meta band, next to the seal box) ───────────
     comments = meta.get("comments")
+    comments_html = ""
     if comments:
-        comments_html = html_lib.escape(comments).replace("\n", "<br>")
-        comments_section = f"""
-        <h2>{comments_num} &middot; Comments</h2>
-        <p style="font-size:0.88em;line-height:1.6;white-space:pre-wrap">{comments_html}</p>
-        """
+        comments_html = (
+            '<div class="meta-item" style="margin-top:6px"><span class="lbl">Comments</span>'
+            f'<span class="val" style="font-weight:400;white-space:pre-wrap">'
+            f'{html_lib.escape(comments)}</span></div>'
+        )
+
+    # ── Partial Volume inputs (own sub-table, as on the calc page) ────────────
+    pv_section = ""
+    if out.get("Xr") is not None:
+        pv_rows = (
+            _row("Active", _fmt(bool(out.get("partial_volume_active"))), "§8.4") +
+            _row("Reduction factor Xr", f"{_fmt(out.get('Xr'))} —", "§8.4.3", alt=True)
+        )
+        pv_section = _table("Partial Volume — §8.4", pv_rows)
 
     # ── Full HTML document ────────────────────────────────────────────────────
+    # Styling follows docs_for_claude_code/2026-06-16 Template Document Capt-Air.dotx
+    # (Arial, navy/orange, "Brand Table", orange footer rule, 12.7/15.9 mm margins).
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -333,157 +366,164 @@ def _build_html(run: dict, logo_path: Optional[str] = None) -> str:
 <style>
   * {{ box-sizing:border-box; margin:0; padding:0; }}
   body {{
-    font-family: Georgia, 'Times New Roman', serif;
-    font-size: 10pt;
+    font-family: Arial, Helvetica, sans-serif;
+    font-size: 11pt;
     color: {P['text']};
     background: #fff;
-    line-height: 1.55;
+    line-height: 1.1;
   }}
   @page {{
     size: Letter;
-    margin: 18mm 18mm 22mm 18mm;
-    @bottom-center {{
-      content: "NFPA 68 (2023) — Deflagration Vent Sizing  |  Page " counter(page) " of " counter(pages);
-      font-size: 7.5pt;
-      color: {P['muted']};
+    margin: 12.7mm 15.9mm 16mm 15.9mm;
+    @bottom-left {{
+      content: "{FOOTER_TEXT}";
+      font-family: Arial, Helvetica, sans-serif;
+      font-size: 8pt;
+      color: {P['footer']};
+      border-top: 1pt solid {P['accent']};
+      padding-top: 2mm;
+      width: 100%;
+    }}
+    @bottom-right {{
+      content: "Page " counter(page) " of " counter(pages);
+      font-family: Arial, Helvetica, sans-serif;
+      font-size: 8pt;
+      color: {P['footer']};
+      border-top: 1pt solid {P['accent']};
+      padding-top: 2mm;
+      width: 100%;
+      text-align: right;
     }}
   }}
-  .cover-bar {{
-    background: {P['primary']};
-    color: #fff;
-    padding: 20px 24px 16px;
+  .header {{ width:100%; border-collapse:collapse; margin-bottom:6pt; }}
+  .header td {{ border:none; padding:0; vertical-align:middle; }}
+  .header .title {{ font-size:15pt; font-weight:700; color:{P['primary']}; }}
+  .header .sub-title {{ font-size:9pt; color:{P['accent']}; font-weight:700; margin-top:2pt; }}
+  .meta-band {{
     display: flex;
     justify-content: space-between;
-    align-items: center;
+    gap: 16pt;
+    border-top: 1pt solid #AAAAAA;
+    border-bottom: 1pt solid #AAAAAA;
+    padding: 6pt 0;
+    margin-bottom: 8pt;
+    break-inside: avoid;
   }}
-  .cover-bar .title {{ font-size:1.15em; font-weight:700; margin-top:8px; }}
-  .badge {{
-    background: {P['accent']};
-    color: #fff;
-    padding: 4px 12px;
-    border-radius: 3px;
-    font-size: 0.78em;
-    font-weight: 600;
-    letter-spacing: 0.05em;
+  .meta-left {{ flex: 1; }}
+  .meta-item {{ margin-bottom: 3pt; }}
+  .meta-item .lbl {{ color:{P['primary']}; font-size:8pt; font-weight:700; display:block; }}
+  .meta-item .val {{ font-size:10pt; }}
+  .seal {{
+    width: 70mm; height: 40mm; flex: none;
+    border: 1pt solid {P['primary']};
+    position: relative;
   }}
-  .meta-band {{
-    background: {P['bg_alt']};
-    border-bottom: 2px solid {P['rule']};
-    padding: 10px 24px;
-    display: flex;
-    gap: 32px;
-    flex-wrap: wrap;
+  .seal .cap {{
+    position:absolute; top:2mm; left:3mm; font-size:7.5pt; font-weight:700; color:{P['primary']};
   }}
-  .meta-item .lbl {{ color:{P['muted']}; font-size:0.8em; display:block; margin-bottom:1px; }}
-  .meta-item .val {{ font-weight:600; font-size:0.9em; }}
-  .body {{ padding: 20px 24px; }}
+  .seal .sig {{
+    position:absolute; left:3mm; right:3mm; bottom:3mm; border-top:0.5pt solid {P['text']};
+    font-size:7.5pt; color:{P['muted']}; padding-top:1mm;
+  }}
   h2 {{
-    font-size: 1em;
+    font-size: 13pt;
     font-weight: 700;
     color: {P['primary']};
-    border-bottom: 2px solid {P['accent']};
-    padding-bottom: 4px;
-    margin: 22px 0 12px;
+    border-bottom: 1pt solid #AAAAAA;
+    padding-bottom: 2pt;
+    margin: 13pt 0 6pt;
+    break-after: avoid;
   }}
-  table {{ width:100%; border-collapse:collapse; font-size:0.87em; }}
-  td {{ padding:5px 10px; vertical-align:top; border-bottom:1px solid {P['rule']}; }}
-  .result-box {{
-    border: 2.5px solid {P['accent']};
-    border-radius: 5px;
-    padding: 14px 18px;
-    background: {P['accent_lt']};
-    margin: 18px 0 4px;
-  }}
-  .result-box .lbl {{ font-size:0.82em; color:{P['muted']}; }}
-  .result-box .val {{
-    font-size: 2em;
+  h3 {{
+    font-size: 11pt;
     font-weight: 700;
-    color: {P['accent']};
+    color: {P['primary']};
+    margin: 10pt 0 4pt;
+    break-after: avoid;
+  }}
+  .sub {{ break-inside: avoid; margin-bottom: 6pt; }}
+  table {{ width:100%; border-collapse:collapse; font-size:9pt; }}
+  td {{ padding:3pt 5.5pt; vertical-align:top; border:0.25pt solid {P['rule']}; }}
+  .result-box {{
+    border: 1.5pt solid {P['accent']};
+    padding: 8pt 12pt;
+    background: {P['accent_lt']};
+    margin: 0 0 4pt;
+    break-inside: avoid;
+  }}
+  .result-box .lbl {{ font-size:9pt; font-weight:700; color:{P['primary']}; }}
+  .result-box .val {{
+    font-size: 20pt;
+    font-weight: 700;
+    color: {P['primary']};
     font-family: monospace;
     line-height: 1.1;
   }}
-  .result-box .sub {{ font-size:0.78em; color:{P['muted']}; margin-top:3px; }}
-  .two-col {{ display:flex; gap:24px; }}
-  .two-col > div {{ flex:1; }}
+  .result-box .sub-cap {{ font-size:8pt; color:{P['muted']}; margin-top:2pt; }}
 </style>
 </head>
 <body>
 
-<div class="cover-bar">
-  <div>
-    {logo_html}
-    <div class="title">Deflagration Vent Sizing — Combustible Dusts</div>
-  </div>
-  <div style="text-align:right">
-    <span class="badge">NFPA 68 · 2023</span>
-    <div style="font-size:0.75em;margin-top:6px;opacity:0.7">Chapter 8 · §8.2 – §8.5</div>
-  </div>
-</div>
+<table class="header"><tr>
+  <td>{logo_html}</td>
+  <td style="text-align:right">
+    <div class="title">Deflagration Vent Sizing &mdash; Combustible Dusts</div>
+    <div class="sub-title">NFPA 68 &middot; 2023 &middot; Chapter 8 &middot; &sect;8.2 &ndash; &sect;8.5</div>
+  </td>
+</tr></table>
 
 <div class="meta-band">
-  <div class="meta-item"><span class="lbl">Project</span><span class="val">{meta.get('project','—')}</span></div>
-  <div class="meta-item"><span class="lbl">Calculation</span><span class="val">{meta.get('label','—')}</span></div>
-  <div class="meta-item"><span class="lbl">Engineer</span><span class="val">{meta.get('engineer','—')}</span></div>
-  <div class="meta-item"><span class="lbl">Date</span><span class="val">{ts_fmt}</span></div>
+  <div class="meta-left">
+    <div class="meta-item"><span class="lbl">Project</span><span class="val">{html_lib.escape(str(meta.get('project','—')))}</span></div>
+    <div class="meta-item"><span class="lbl">Calculation</span><span class="val">{html_lib.escape(str(meta.get('label','—')))}</span></div>
+    <div class="meta-item"><span class="lbl">Engineer</span><span class="val">{html_lib.escape(str(meta.get('engineer','—')))}</span></div>
+    <div class="meta-item"><span class="lbl">Date</span><span class="val">{ts_fmt}</span></div>
+    {comments_html}
+  </div>
+  <div class="seal">
+    <div class="cap">Engineer&rsquo;s seal / stamp</div>
+    <div class="sig">Signature &nbsp;&nbsp; Date<br>{html_lib.escape(str(meta.get('engineer','')))}</div>
+  </div>
 </div>
 
-<div class="body">
-
-  <div class="result-box">
-    <div class="lbl">MINIMUM REQUIRED VENT AREA</div>
-    <div class="val">{_fmt(out.get('Av_final'), 4)} m²</div>
-    <div class="sub">{av_final_caption}</div>
-  </div>
-
-  {geometry_section}
-
-  <h2>{input_num} · Input Parameters</h2>
-  <div class="two-col">
-    <div>
-      <table>
-        {_subhead("Enclosure — §8.1.1")}
-        {_row("Volume V",            f"{_fmt(enc.get('V'),2)} m³",     "§8.2.1")}
-        {_row("L/D ratio",           f"{_fmt(enc.get('LD'),2)} —",     "§8.1.1", alt=True)}
-        {_row("Solid volume Vsolid", f"{_fmt(enc.get('Vsolid'),2)} m³","§8.4.1")}
-      </table>
-      <table style="margin-top:10px">
-        {_subhead("Vent Panel — §8.3")}
-        {_row("Reduced pressure Pred", f"{_fmt(vent.get('Pred'),3)} bar-g",  "§8.2.1")}
-        {_row("Static burst Pstat",    f"{_fmt(vent.get('Pstat'),3)} bar-g", "§8.2.1", alt=True)}
-        {_row("Number of panels n",    f"{vent.get('n','—')} —",             "§8.3.2")}
-        {_row("Areal mass M",          f"{_fmt(vent.get('M'),2)} kg/m²",     "§8.3", alt=True)}
-        {_row("Shape factor Fsh",      f"{_fmt(vent.get('Fsh'),2)} —",       "§8.3.4")}
-      </table>
-    </div>
-    <div>
-      <table>
-        {_subhead("Dust Characteristics — §8.1.2")}
-        {_row("Deflagration index KSt", f"{_fmt(dust.get('KSt'),1)} bar·m/s","§8.1.2")}
-        {_row("Maximum pressure Pmax",  f"{_fmt(dust.get('Pmax'),2)} bar-g", "§8.2.1", alt=True)}
-        {_row("Initial pressure Pi",    f"{_fmt(dust.get('Pinitial'),3)} bar-g","§8.2.1")}
-        {_row("Pressure regime",        regime,                                 "§8.2.1", alt=True)}
-      </table>
-      <table style="margin-top:10px">
-        {_subhead("Turbulence — §8.2.4")}
-        {_row("Mode",                 turb,                                                                              "§8.2.4")}
-        {_row("Axial velocity vaxial",f"{_fmt(out.get('vaxial'),2)} m/s" if out.get('vaxial') is not None else "—",     "§8.2.4.1", alt=True)}
-        {_row("Tangential vel. vtan", f"{_fmt(out.get('vtan'),2)} m/s"   if out.get('vtan')   is not None else "—",     "§8.2.4.2")}
-      </table>
-    </div>
-  </div>
-
-  <h2>{chain_num} · Calculation Chain</h2>
-  <table>{chain_rows}</table>
-  {duct_section}
-
-  {selection_section}
-
-  {comments_section}
-
+<div class="result-box">
+  <div class="lbl">MINIMUM REQUIRED VENT AREA</div>
+  <div class="val">{_fmt(out.get('Av_final'), 4)} m²</div>
+  <div class="sub-cap">{av_final_caption}</div>
 </div>
+
+{geometry_section}
+
+<h2>{input_num} &middot; Input Parameters</h2>
+{_table("Enclosure — §8.1.1",
+    _row("Volume V",            f"{_fmt(enc.get('V'),2)} m³",     "§8.2.1") +
+    _row("L/D ratio",           f"{_fmt(enc.get('LD'),2)} —",     "§8.1.1", alt=True) +
+    _row("Solid volume Vsolid", f"{_fmt(enc.get('Vsolid'),2)} m³","§8.4.1"))}
+{_table("Dust Characteristics — §8.1.2",
+    _row("Deflagration index KSt", f"{_fmt(dust.get('KSt'),1)} bar·m/s","§8.1.2") +
+    _row("Maximum pressure Pmax",  f"{_fmt(dust.get('Pmax'),2)} bar-g", "§8.2.1", alt=True) +
+    _row("Initial pressure Pi",    f"{_fmt(dust.get('Pinitial'),3)} bar-g","§8.2.1") +
+    _row("Pressure regime",        regime,                                 "§8.2.1", alt=True))}
+{_table("Vent Panel — §8.3",
+    _row("Reduced pressure Pred", f"{_fmt(vent.get('Pred'),3)} bar-g",  "§8.2.1") +
+    _row("Static burst Pstat",    f"{_fmt(vent.get('Pstat'),3)} bar-g", "§8.2.1", alt=True) +
+    _row("Number of panels n",    f"{vent.get('n','—')} —",             "§8.3.2") +
+    _row("Areal mass M",          f"{_fmt(vent.get('M'),2)} kg/m²",     "§8.3", alt=True) +
+    _row("Shape factor Fsh",      f"{_fmt(vent.get('Fsh'),2)} —",       "§8.3.4"))}
+{duct_section}
+{_table("Turbulence — §8.2.4",
+    _row("Mode",                 turb,                                                                          "§8.2.4") +
+    _row("Axial velocity vaxial",f"{_fmt(out.get('vaxial'),2)} m/s" if out.get('vaxial') is not None else "—", "§8.2.4.1", alt=True) +
+    _row("Tangential vel. vtan", f"{_fmt(out.get('vtan'),2)} m/s"   if out.get('vtan')   is not None else "—", "§8.2.4.2"))}
+{pv_section}
+
+<h2>{chain_num} &middot; Calculation Chain</h2>
+<table>{chain_rows}</table>
+
+{selection_section}
+
 </body>
 </html>"""
-
     return html
 
 
