@@ -83,8 +83,8 @@ def _row(label: str, value: str, ref: str = "", alt: bool = False, highlight: bo
     return (
         f'<tr style="background:{bg}">'
         f'<td style="font-weight:700;color:{P["primary"]};width:38%">{label}</td>'
-        f'<td style="font-weight:{fw};font-family:monospace">{value}</td>'
-        f'<td style="color:{P["muted"]};font-size:0.85em">{ref}</td>'
+        f'<td style="font-weight:{fw};font-family:monospace;width:42%">{value}</td>'
+        f'<td style="color:{P["muted"]};font-size:0.85em;width:20%">{ref}</td>'
         f'</tr>'
     )
 
@@ -347,14 +347,88 @@ def _build_html(run: dict, logo_path: Optional[str] = None) -> str:
             f'{html_lib.escape(comments)}</span></div>'
         )
 
-    # ── Partial Volume inputs (own sub-table, as on the calc page) ────────────
+    # ── Input sub-tables — same grouping and contents as the calc page ────────
+    def _striped(rows) -> str:
+        """Render (label, value, ref) tuples with alternating banding."""
+        return "".join(_row(l, v, r, alt=(i % 2 == 1)) for i, (l, v, r) in enumerate(rows))
+
+    def _unit(v, dec, unit):
+        return f"{_fmt(v, dec)} {unit}" if v is not None else "—"
+
+    calc_variant = str(inp.get("calc_variant") or "Standard enclosure")
+    is_collector = "collector" in calc_variant.lower()
+    enc_rows = [("Enclosure type", html_lib.escape(calc_variant), "§8.7" if is_collector else "§8.1.1")]
+    if is_collector:
+        enc_rows.append(("Flexible filters above vent, no restraints",
+                         _fmt(bool(inp.get("flexible_filters"))), "§8.7.2"))
+    enc_rows += [
+        ("Volume V",              _unit(enc.get("V"), 2, "m³"),               "§8.2.1"),
+        ("L/D ratio",             _unit(enc.get("LD"), 2, "—"),               "§8.1.1"),
+        ("Solid volume Vsolid",   _unit(enc.get("Vsolid"), 2, "m³"),          "§8.4.1"),
+        ("Reduced pressure Pred", _unit(vent.get("Pred"), 3, "bar-g"),        "§8.2.1"),
+        ("Initial pressure Pi",   _unit(dust.get("Pinitial"), 3, "bar-g"),    "§8.2.1"),
+        ("Pressure regime",       regime,                                     "§8.2.1"),
+    ]
+    if out.get("pressure_regime") == "SUBATMOSPHERIC":
+        simplified = inp.get("subatm_method") == "SIMPLIFIED"
+        enc_rows.append(("Subatmospheric method",
+                         "Simplified" if simplified else "General",
+                         "Eq. 8.2.1.2.2" if simplified else "Eq. 8.2.1.2"))
+    enclosure_section = _table("Enclosure — §8.1.1", _striped(enc_rows))
+
+    dust_section = _table("Dust Characteristics — §8.1.2", _striped([
+        ("Deflagration index KSt", _unit(dust.get("KSt"), 1, "bar·m/s"), "§8.1.2"),
+        ("Maximum pressure Pmax",  _unit(dust.get("Pmax"), 2, "bar-g"),  "§8.2.1"),
+    ]))
+
+    turb_rows = [("Mode", turb, "§8.2.4")]
+    ti = inp.get("turb_inputs") or {}
+    if out.get("turbulence_mode") == "PROCESS" and ti:
+        turb_rows += [
+            ("Flow rate Q",             _unit(ti.get("Q"), 3, "m³/s"), "§8.2.4.1"),
+            ("Cross-sectional area A",  _unit(ti.get("A"), 3, "m²"),   "§8.2.4.1"),
+        ]
+        if ti.get("Ain") is not None:
+            turb_rows.append(("Tangential inlet area Ain", _unit(ti.get("Ain"), 3, "m²"), "§8.2.4.2"))
+    turb_rows += [
+        ("Axial velocity vaxial", _unit(out.get("vaxial"), 2, "m/s"), "§8.2.4.1"),
+        ("Tangential vel. vtan",  _unit(out.get("vtan"), 2, "m/s"),   "§8.2.4.2"),
+    ]
+    turb_section = _table("Turbulence — §8.2.4", _striped(turb_rows))
+
+    vent_section = _table("Vent Panel — §8.3", _striped([
+        ("Static burst Pstat", _unit(vent.get("Pstat"), 3, "bar-g"), "§8.2.1"),
+        ("Number of panels n", f"{vent.get('n', '—')} —",             "§8.3.2"),
+        ("Areal mass M",       _unit(vent.get("M"), 2, "kg/m²"),      "§8.3"),
+        ("Shape factor Fsh",   _unit(vent.get("Fsh"), 2, "—"),        "§8.3.4"),
+    ]))
+
     pv_section = ""
     if out.get("Xr") is not None:
-        pv_rows = (
-            _row("Active", _fmt(bool(out.get("partial_volume_active"))), "§8.4") +
-            _row("Reduction factor Xr", f"{_fmt(out.get('Xr'))} —", "§8.4.3", alt=True)
-        )
-        pv_section = _table("Partial Volume — §8.4", pv_rows)
+        pv = inp.get("partial_volume") or {}
+        pv_rows = [("Active", _fmt(bool(out.get("partial_volume_active"))), "§8.4")]
+        if pv.get("use_building"):
+            pv_rows += [
+                ("Method",                   "Building",                            "§8.4.5"),
+                ("Avg floor mass",           _unit(pv.get("Mf_bar"), 1, "g"),       "§8.4.5"),
+                ("Dusty floor area",         _unit(pv.get("Af_dusty"), 2, "m²"),    "§8.4.5"),
+                ("Floor entrainment ηD",     _unit(pv.get("eta_Dfloor"), 2, "—"),   "§8.4.5"),
+                ("Floor sample area",        _unit(pv.get("Afs"), 4, "m²"),         "§8.4.5"),
+                ("Avg surface mass",         _unit(pv.get("Ms_bar"), 1, "g"),       "§8.4.5"),
+                ("Total surface area",       _unit(pv.get("Asur"), 2, "m²"),        "§8.4.5"),
+                ("Surface entrainment ηD",   _unit(pv.get("eta_Dsur"), 2, "—"),     "§8.4.5"),
+                ("Surface sample area",      _unit(pv.get("Ass"), 4, "m²"),         "§8.4.5"),
+                ("Equipment dust Me",        _unit(pv.get("Me_equipment"), 1, "g"), "§8.4.5"),
+                ("Worst-case conc. cw",      _unit(pv.get("cw"), 1, "g/m³"),        "§8.4.2.2"),
+            ]
+        elif pv:
+            pv_rows += [
+                ("Method",              "Process enclosure",            "§8.4.1"),
+                ("Suspended dust Me",   _unit(pv.get("Me"), 1, "g"),    "§8.4.1"),
+                ("Worst-case conc. cw", _unit(pv.get("cw"), 1, "g/m³"), "§8.4.2.2"),
+            ]
+        pv_rows.append(("Reduction factor Xr", f"{_fmt(out.get('Xr'))} —", "§8.4.3"))
+        pv_section = _table("Partial Volume — §8.4", _striped(pv_rows))
 
     # ── Full HTML document ────────────────────────────────────────────────────
     # Styling follows docs_for_claude_code/2026-06-16 Template Document Capt-Air.dotx
@@ -395,7 +469,7 @@ def _build_html(run: dict, logo_path: Optional[str] = None) -> str:
       text-align: right;
     }}
   }}
-  .header {{ width:100%; border-collapse:collapse; margin-bottom:6pt; }}
+  .header {{ width:100%; border-collapse:collapse; margin-bottom:6pt; table-layout:auto; }}
   .header td {{ border:none; padding:0; vertical-align:middle; }}
   .header .title {{ font-size:15pt; font-weight:700; color:{P['primary']}; }}
   .header .sub-title {{ font-size:9pt; color:{P['accent']}; font-weight:700; margin-top:2pt; }}
@@ -414,16 +488,12 @@ def _build_html(run: dict, logo_path: Optional[str] = None) -> str:
   .meta-item .lbl {{ color:{P['primary']}; font-size:8pt; font-weight:700; display:block; }}
   .meta-item .val {{ font-size:10pt; }}
   .seal {{
-    width: 70mm; height: 40mm; flex: none;
+    width: 40mm; height: 40mm; flex: none;
     border: 1pt solid {P['primary']};
     position: relative;
   }}
   .seal .cap {{
     position:absolute; top:2mm; left:3mm; font-size:7.5pt; font-weight:700; color:{P['primary']};
-  }}
-  .seal .sig {{
-    position:absolute; left:3mm; right:3mm; bottom:3mm; border-top:0.5pt solid {P['text']};
-    font-size:7.5pt; color:{P['muted']}; padding-top:1mm;
   }}
   h2 {{
     font-size: 13pt;
@@ -442,7 +512,7 @@ def _build_html(run: dict, logo_path: Optional[str] = None) -> str:
     break-after: avoid;
   }}
   .sub {{ break-inside: avoid; margin-bottom: 6pt; }}
-  table {{ width:100%; border-collapse:collapse; font-size:9pt; }}
+  table {{ width:100%; border-collapse:collapse; font-size:9pt; table-layout:fixed; }}
   td {{ padding:3pt 5.5pt; vertical-align:top; border:0.25pt solid {P['rule']}; }}
   .result-box {{
     border: 1.5pt solid {P['accent']};
@@ -467,7 +537,7 @@ def _build_html(run: dict, logo_path: Optional[str] = None) -> str:
 <table class="header"><tr>
   <td>{logo_html}</td>
   <td style="text-align:right">
-    <div class="title">Deflagration Vent Sizing &mdash; Combustible Dusts</div>
+    <div class="title">Deflagration Vent Sizing<br>Combustible Dusts</div>
     <div class="sub-title">NFPA 68 &middot; 2023 &middot; Chapter 8 &middot; &sect;8.2 &ndash; &sect;8.5</div>
   </td>
 </tr></table>
@@ -481,9 +551,7 @@ def _build_html(run: dict, logo_path: Optional[str] = None) -> str:
     {comments_html}
   </div>
   <div class="seal">
-    <div class="cap">Engineer&rsquo;s seal / stamp</div>
-    <div class="sig">Signature &nbsp;&nbsp; Date<br>{html_lib.escape(str(meta.get('engineer','')))}</div>
-  </div>
+    <div class="cap">Engineer&rsquo;s seal / stamp</div>  </div>
 </div>
 
 <div class="result-box">
@@ -495,27 +563,12 @@ def _build_html(run: dict, logo_path: Optional[str] = None) -> str:
 {geometry_section}
 
 <h2>{input_num} &middot; Input Parameters</h2>
-{_table("Enclosure — §8.1.1",
-    _row("Volume V",            f"{_fmt(enc.get('V'),2)} m³",     "§8.2.1") +
-    _row("L/D ratio",           f"{_fmt(enc.get('LD'),2)} —",     "§8.1.1", alt=True) +
-    _row("Solid volume Vsolid", f"{_fmt(enc.get('Vsolid'),2)} m³","§8.4.1"))}
-{_table("Dust Characteristics — §8.1.2",
-    _row("Deflagration index KSt", f"{_fmt(dust.get('KSt'),1)} bar·m/s","§8.1.2") +
-    _row("Maximum pressure Pmax",  f"{_fmt(dust.get('Pmax'),2)} bar-g", "§8.2.1", alt=True) +
-    _row("Initial pressure Pi",    f"{_fmt(dust.get('Pinitial'),3)} bar-g","§8.2.1") +
-    _row("Pressure regime",        regime,                                 "§8.2.1", alt=True))}
-{_table("Vent Panel — §8.3",
-    _row("Reduced pressure Pred", f"{_fmt(vent.get('Pred'),3)} bar-g",  "§8.2.1") +
-    _row("Static burst Pstat",    f"{_fmt(vent.get('Pstat'),3)} bar-g", "§8.2.1", alt=True) +
-    _row("Number of panels n",    f"{vent.get('n','—')} —",             "§8.3.2") +
-    _row("Areal mass M",          f"{_fmt(vent.get('M'),2)} kg/m²",     "§8.3", alt=True) +
-    _row("Shape factor Fsh",      f"{_fmt(vent.get('Fsh'),2)} —",       "§8.3.4"))}
-{duct_section}
-{_table("Turbulence — §8.2.4",
-    _row("Mode",                 turb,                                                                          "§8.2.4") +
-    _row("Axial velocity vaxial",f"{_fmt(out.get('vaxial'),2)} m/s" if out.get('vaxial') is not None else "—", "§8.2.4.1", alt=True) +
-    _row("Tangential vel. vtan", f"{_fmt(out.get('vtan'),2)} m/s"   if out.get('vtan')   is not None else "—", "§8.2.4.2"))}
+{enclosure_section}
+{dust_section}
+{turb_section}
+{vent_section}
 {pv_section}
+{duct_section}
 
 <h2>{chain_num} &middot; Calculation Chain</h2>
 <table>{chain_rows}</table>

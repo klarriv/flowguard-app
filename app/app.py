@@ -15,6 +15,8 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+# Hide Streamlit's auto page list; config.toml only applies when launched from the repo root.
+st.set_option("client.showSidebarNavigation", False)
 
 with st.sidebar:
     logo_path = Path(__file__).parent / "assets" / "logo_capt-air.jpg"
