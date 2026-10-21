@@ -9,6 +9,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import streamlit as st
 
+from components.ductulator import render_converters, render_ductulator
+
 st.set_page_config(
     page_title="FlowGuard",
     page_icon="F",
@@ -29,9 +31,13 @@ with st.sidebar:
     st.markdown("---")
     st.caption("NFPA 68 (2023) · Internal use only")
 
-st.title("Engineering Calculations")
-st.markdown("Select a calculation from the sidebar to begin.")
+st.title("FlowGuard")
+st.caption("Engineering calculations — quick tools first, full calculations in the sidebar.")
+
+render_ductulator()
+render_converters()
 
 st.markdown("---")
 st.markdown("#### Available calculations")
+st.markdown("Select a calculation from the sidebar to begin.")
 st.page_link("pages/1_Dust_Vent_NFPA68.py", label="💨 Dust Deflagration Vent Sizing — NFPA 68 (2023) Ch.8")
