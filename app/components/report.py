@@ -284,6 +284,8 @@ def _build_html(run: dict, logo_path: Optional[str] = None) -> str:
         mode = geo.get("mode", "—")
         if mode == "Donaldson":
             method_label = f"Donaldson — {geo.get('donaldson_family', '—')} · {geo.get('donaldson_model', '—')}"
+            if geo.get("donaldson_hopper"):
+                method_label += f" · {geo['donaldson_hopper']}"
         else:
             method_label = mode
         shape_label = _CROSS_SECTION_LABELS.get(geo.get("cross_section_family"), geo.get("cross_section_family", "—"))
@@ -337,13 +339,13 @@ def _build_html(run: dict, logo_path: Optional[str] = None) -> str:
         <div class="sub"><table>{sr}</table></div>
         """
 
-    # ── Comments (shown in the top meta band, next to the seal box) ───────────
-    comments = meta.get("comments")
+    # ── Comments (middle column of the meta band, left of the seal box) ───────
+    comments = (meta.get("comments") or "").strip()
     comments_html = ""
     if comments:
         comments_html = (
-            '<div class="meta-item" style="margin-top:6px"><span class="lbl">Comments</span>'
-            f'<span class="val" style="font-weight:400;white-space:pre-wrap">'
+            '<div class="meta-item"><span class="lbl">Comments</span>'
+            f'<span class="val" style="white-space:pre-wrap">'
             f'{html_lib.escape(comments)}</span></div>'
         )
 
@@ -483,7 +485,8 @@ def _build_html(run: dict, logo_path: Optional[str] = None) -> str:
     margin-bottom: 8pt;
     break-inside: avoid;
   }}
-  .meta-left {{ flex: 1; }}
+  .meta-left {{ flex: none; width: 55mm; }}
+  .meta-comments {{ flex: 1; min-width: 0; overflow-wrap: anywhere; }}
   .meta-item {{ margin-bottom: 3pt; }}
   .meta-item .lbl {{ color:{P['primary']}; font-size:8pt; font-weight:700; display:block; }}
   .meta-item .val {{ font-size:10pt; }}
@@ -548,8 +551,8 @@ def _build_html(run: dict, logo_path: Optional[str] = None) -> str:
     <div class="meta-item"><span class="lbl">Calculation</span><span class="val">{html_lib.escape(str(meta.get('label','—')))}</span></div>
     <div class="meta-item"><span class="lbl">Engineer</span><span class="val">{html_lib.escape(str(meta.get('engineer','—')))}</span></div>
     <div class="meta-item"><span class="lbl">Date</span><span class="val">{ts_fmt}</span></div>
-    {comments_html}
   </div>
+  <div class="meta-comments">{comments_html}</div>
   <div class="seal">
     <div class="cap">Engineer&rsquo;s seal / stamp</div>  </div>
 </div>
