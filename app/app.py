@@ -34,8 +34,11 @@ with st.sidebar:
 st.title("FlowGuard")
 st.caption("Engineering calculations — quick tools first, full calculations in the sidebar.")
 
-render_ductulator()
-render_converters()
+left, right = st.columns(2, gap="large")
+with left:
+    render_ductulator()
+with right:
+    render_converters()
 
 st.markdown("---")
 st.markdown("#### Available calculations")

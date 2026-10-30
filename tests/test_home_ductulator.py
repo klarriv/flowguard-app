@@ -8,92 +8,111 @@ AppTest = pytest.importorskip("streamlit.testing.v1").AppTest
 
 ROOT = Path(__file__).resolve().parent.parent
 HOME = str(ROOT / "app" / "app.py")
-DUST_VENT = str(ROOT / "app" / "pages" / "1_Dust_Vent_NFPA68.py")
 
 
 def _home():
     return AppTest.from_file(HOME, default_timeout=30).run()
 
 
-def _metrics(at):
-    return {m.label: m.value for m in at.metric}
+def _val(at, key):
+    return at.number_input(key=key).value
+
+
+def _seg(at, key, value):
+    at.button_group(key=key).set_value(value).run()
+
+
+def _md(at):
+    return " ".join(m.value for m in at.markdown)
 
 
 def test_home_runs_without_exception():
     assert not _home().exception
 
 
-def test_case1_solve_velocity():
+def test_case1_solve_velocity_in_disabled_input():
     at = _home()
-    at.number_input(key="duct_q_imp").set_value(2700.0)
-    at.number_input(key="duct_d_imp").set_value(14.0)
+    at.number_input(key="duct_q").set_value(2700.0)
+    at.number_input(key="duct_d").set_value(14.0)
     at.run()
-    assert _metrics(at)["Velocity [FPM]"] == "2,526"
-    assert "12.83 m/s" in [c.value for c in at.caption]
+    assert at.number_input(key="duct_v").disabled
+    assert round(_val(at, "duct_v")) == 2526
+    assert "12.83 m/s" in " ".join(c.value for c in at.caption)
 
 
 def test_case2_solve_duct_id():
     at = _home()
-    at.radio(key="duct_solve_for").set_value("Duct ID").run()
-    at.number_input(key="duct_q_imp").set_value(3500.0)
-    at.number_input(key="duct_v_imp").set_value(4000.0)
+    _seg(at, "duct_solve_for", "Duct ID")
+    at.number_input(key="duct_q").set_value(3500.0)
+    at.number_input(key="duct_v").set_value(4000.0)
     at.run()
-    assert _metrics(at)["Duct ID [in]"] == "12.7"
+    assert at.number_input(key="duct_d").disabled
+    assert not at.number_input(key="duct_v").disabled
+    assert round(_val(at, "duct_d"), 1) == 12.7
 
 
 def test_case3_solve_flow():
     at = _home()
-    at.radio(key="duct_solve_for").set_value("Flow").run()
-    at.number_input(key="duct_d_imp").set_value(7.0)
-    at.number_input(key="duct_v_imp").set_value(4000.0)
+    _seg(at, "duct_solve_for", "Flow")
+    at.number_input(key="duct_d").set_value(7.0)
+    at.number_input(key="duct_v").set_value(4000.0)
     at.run()
-    assert _metrics(at)["Flow [CFM]"] == "1,069"
+    assert round(_val(at, "duct_q")) == 1069
 
 
-def test_si_toggle_same_physical_result():
+def test_previous_result_becomes_input():
+    at = _home()  # 2700 CFM, 14 in -> 2526 FPM
+    _seg(at, "duct_solve_for", "Flow")
+    assert round(_val(at, "duct_v")) == 2526
+    assert abs(_val(at, "duct_q") - 2700) < 1e-6
+
+
+def test_units_toggle_converts_values():
     at = _home()
-    at.radio(key="duct_units").set_value("SI").run()
-    at.number_input(key="duct_q_si").set_value(4588.0)
-    at.number_input(key="duct_d_si").set_value(356.0)
-    at.run()
-    assert abs(float(_metrics(at)["Velocity [m/s]"]) - 12.83) < 0.05
+    _seg(at, "duct_units", "SI")
+    assert round(_val(at, "duct_q")) == 4587  # 2700 CFM = 4,587.3 m³/h
+    assert abs(_val(at, "duct_d") - 355.6) < 1e-6
+    assert abs(_val(at, "duct_v") - 12.83) < 0.01
+    _seg(at, "duct_units", "Imperial")
+    assert abs(_val(at, "duct_q") - 2700) < 1e-6
+    assert abs(_val(at, "duct_d") - 14) < 1e-6
 
 
 def test_zero_input_warns_without_exception():
     at = _home()
-    at.number_input(key="duct_q_imp").set_value(0.0).run()
+    at.number_input(key="duct_q").set_value(0.0).run()
     assert not at.exception
-    assert at.warning
+    assert _val(at, "duct_v") is None
+    assert "greater than 0" in " ".join(c.value for c in at.caption)
 
 
 def test_flow_converter_cases_4_5():
     at = _home()
     at.number_input(key="conv_flow_value").set_value(3400.0).run()
-    m = _metrics(at)
-    assert m["m³/h"] == "5,777" and m["m³/s"] == "1.605"
+    assert "**5,777** m³/h" in _md(at) and "**1.605** m³/s" in _md(at)
     at.selectbox(key="conv_flow_unit").set_value("m³/h").run()
     at.number_input(key="conv_flow_value").set_value(72000.0).run()
-    m = _metrics(at)
-    assert m["CFM"] == "42,378" and m["m³/s"] == "20.000"
+    assert "**42,378** CFM" in _md(at) and "**20.000** m³/s" in _md(at)
 
 
 def test_velocity_converter_cases_6_7():
     at = _home()
     at.number_input(key="conv_velocity_value").set_value(4400.0).run()
-    assert _metrics(at)["m/s"] == "22.35"
+    assert "**22.35** m/s" in _md(at)
     at.selectbox(key="conv_velocity_unit").set_value("m/s").run()
     at.number_input(key="conv_velocity_value").set_value(22.68).run()
-    assert _metrics(at)["FPM"] == "4,465"
+    assert "**4,465** FPM" in _md(at)
 
 
 def test_pressure_converter_case_8_library_values():
     at = _home()
     at.number_input(key="conv_pressure_value").set_value(230.0).run()
-    m = _metrics(at)
-    assert (m["inHg"], m["psi"], m["Pa"]) == ("16.92", "8.31", "57,290")
-    assert (m["bar"], m["atm"]) == ("0.573", "0.565")
+    md = _md(at)
+    for s in ("**16.92** inHg", "**8.31** psi", "**57,290** Pa", "**0.573** bar", "**0.565** atm"):
+        assert s in md
 
 
 def test_dust_vent_page_loads():
-    at = AppTest.from_file(DUST_VENT, default_timeout=60).run()
+    at = _home()
+    at.switch_page("pages/1_Dust_Vent_NFPA68.py").run()
     assert not at.exception
