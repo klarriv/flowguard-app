@@ -19,7 +19,8 @@ from explosion_protection.nfpa_68_ch6_orchestrator import (
 )
 from core.enclosure_catalog import (
     circular_enclosure_default, rectangular_enclosure_default,
-    list_families, list_models, list_hoppers, get_segments,
+    list_families, list_models, list_hoppers, get_segments, get_max_pred,
+    get_flexible_filters,
 )
 from core.vent_panel_catalog import (
     list_manufacturers, list_panel_types as list_vent_panel_types,
@@ -34,6 +35,8 @@ from explosion_protection.nfpa_68_ch8_orchestrator import (
 )
 
 from utils.serializer import inputs_to_dict, result_to_dict, build_run_payload
+
+ENCLOSURE_TYPES = ["Standard enclosure", "Dust collector (§8.7)"]
 
 # ── Enclosure Geometry — unit conversion (display-only; math lives in flowguard) ─
 UNIT_TO_M     = {"m": 1.0,   "ft": 0.3048, "in": 0.0254}
@@ -297,6 +300,14 @@ with st.sidebar:
             st.session_state["loaded_run"] = data
             st.session_state["_loaded_run_file_id"] = uploaded.file_id
             st.session_state["_show_loaded_banner"] = True
+            _saved_pred = ((data.get("inputs") or {}).get("vent") or {}).get("Pred")
+            if _saved_pred is not None:
+                st.session_state["in_Pred"] = float(_saved_pred)
+            _inputs = data.get("inputs") or {}
+            st.session_state["in_calc_variant"] = (
+                ENCLOSURE_TYPES[1] if "Dust collector" in str(_inputs.get("calc_variant", ""))
+                else ENCLOSURE_TYPES[0])
+            st.session_state["in_flex_filters"] = bool(_inputs.get("flexible_filters", False))
             # Seed the Enclosure Geometry segment builder here, once, at upload
             # time — not on every rerun (see the persistent `loaded` read below).
             _geo = (data.get("inputs") or {}).get("geometry")
@@ -438,6 +449,13 @@ if reset_col.button("🔄 Reset All", key="reset_all_btn", use_container_width=T
     st.rerun()
 
 GEOM_MODES = ["Circular Enclosure", "Rectangular Enclosure", "Donaldson", "Manual Input"]
+# Pred, enclosure type and the flexible-filter checkbox are keyed (Donaldson
+# fills them). The geometry builder can st.rerun() before they are drawn, and
+# Streamlit drops widget state that isn't drawn or written in a run (the
+# checkbox is also hidden for standard enclosures), so write them back here.
+for _k in ("in_Pred", "in_calc_variant", "in_flex_filters"):
+    if _k in st.session_state:
+        st.session_state[_k] = st.session_state[_k]
 _prev_geom_mode = st.session_state.get("eg_mode", "Manual Input")
 geom_mode = st.selectbox(
     "Enclosure geometry method",
@@ -485,6 +503,19 @@ if geom_mode == "Donaldson":
 
     if _reseed:
         _seed_segments(get_segments(donaldson_family, donaldson_model, donaldson_hopper))
+    # Fill Pred with the model's maximum when a model is picked (not on a hopper
+    # change, so a Pred the user typed for this model is kept).
+    if (geom_mode != _prev_geom_mode or donaldson_family != _prev_family
+            or donaldson_model != _prev_model):
+        _max_pred = get_max_pred(donaldson_family, donaldson_model)
+        if _max_pred is not None:
+            st.session_state["in_Pred"] = _max_pred
+    # A Donaldson unit is a dust collector; the flexible-filter default is per
+    # family. Set on switching to Donaldson or changing family only, so the
+    # user's choice survives model/hopper changes and saved-run reloads.
+    if geom_mode != _prev_geom_mode or donaldson_family != _prev_family:
+        st.session_state["in_calc_variant"] = ENCLOSURE_TYPES[1]
+        st.session_state["in_flex_filters"] = get_flexible_filters(donaldson_family)
 
 elif geom_mode == "Circular Enclosure" and _reseed:
     _seed_segments(circular_enclosure_default())
@@ -717,21 +748,26 @@ with r1_left:
 
     lc, ic = st.columns([1, 1], gap="small")
     _label(lc, "Enclosure type")
+    if "in_calc_variant" not in st.session_state:
+        st.session_state["in_calc_variant"] = (
+            ENCLOSURE_TYPES[1] if "Dust collector" in _pre("calc_variant", "") else ENCLOSURE_TYPES[0])
     calc_variant = ic.selectbox(
-        "Enclosure type",
-        ["Standard enclosure", "Dust collector (§8.7)"],
-        index=1 if "Dust collector" in _pre("calc_variant", "Standard enclosure") else 0,
+        "Enclosure type", ENCLOSURE_TYPES, key="in_calc_variant",
         label_visibility="collapsed",
     )
 
     flex_filters = False
     if "Dust collector" in calc_variant:
         lc, ic = st.columns([1, 1], gap="small")
-        _label(lc, "Flexible filters above vent free end, no internal restraints?",
-               "Applies 25% area increase per §8.7.2")
-        flex_filters = ic.checkbox("Flexible filters above vent free end, no internal restraints?",
-                                   value=bool(_pre("flexible_filters", False)),
-                                   label_visibility="collapsed")
+        _label(lc, "Unrestrained flexible filters beside the vent?",
+               "NFPA 68 §8.7.2 — check when all three apply: the filters are flexible "
+               "(e.g. bags); the vent sits entirely above the free (bottom) end of the "
+               "filters; and nothing inside the collector restrains the filters to keep "
+               "a free vent path. Increases the required vent area by 25%.")
+        if "in_flex_filters" not in st.session_state:
+            st.session_state["in_flex_filters"] = bool(_pre("flexible_filters", False))
+        flex_filters = ic.checkbox("Unrestrained flexible filters beside the vent?",
+                                   key="in_flex_filters", label_visibility="collapsed")
 
     lc, ic = st.columns([1, 1], gap="small")
     _label(lc, "Volume V · L/D ratio", "Set above in Enclosure Geometry")
@@ -744,9 +780,15 @@ with r1_left:
 
     lc, ic = st.columns([1, 1], gap="small")
     _label(lc, "Pred [bar-g]")
-    Pred = ic.number_input("Pred [bar-g]", label_visibility="collapsed",
-                           value=float(_pre("vent.Pred", 0.2)), min_value=0.05, max_value=2.0,
-                           step=0.05, format="%.2f")
+    if "in_Pred" not in st.session_state:
+        st.session_state["in_Pred"] = float(_pre("vent.Pred", 0.2))
+    Pred = ic.number_input("Pred [bar-g]", label_visibility="collapsed", key="in_Pred",
+                           min_value=0.05, max_value=2.0, step=0.05, format="%.2f")
+    if geom_mode == "Donaldson":
+        _max_pred = get_max_pred(donaldson_family, donaldson_model)
+        if _max_pred is not None:
+            _msg = f"{donaldson_model} max Pred: {_max_pred:.2f} bar-g"
+            ic.caption(f":orange[{_msg} — exceeded]" if Pred > _max_pred + 1e-9 else _msg)
 
     lc, ic = st.columns([1, 1], gap="small")
     _label(lc, "Pinitial [bar-g]", "0.0 = atmospheric")
