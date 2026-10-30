@@ -19,7 +19,7 @@ from explosion_protection.nfpa_68_ch6_orchestrator import (
 )
 from core.enclosure_catalog import (
     circular_enclosure_default, rectangular_enclosure_default,
-    list_families, list_models, get_model,
+    list_families, list_models, list_hoppers, get_segments,
 )
 from core.vent_panel_catalog import (
     list_manufacturers, list_panel_types as list_vent_panel_types,
@@ -59,11 +59,19 @@ SHAPE_LABELS = {v: k for k, v in SHAPES.items()}
 # directions (UI -> cols/rows in the editor loop, cols/rows -> UI in
 # _seed_segments) so the two can't drift apart.
 SEGMENT_COPY_LAYOUTS = [
-    ("1", None,      1, 1),
-    ("2", "Along X", 2, 1),
-    ("2", "Along Y", 1, 2),
-    ("4", None,      2, 2),
+    ("1", None,        1, 1),
+    ("2", "Along X",   2, 1),
+    ("2", "Along Y",   1, 2),
+    ("3", "Along X",   3, 1),
+    ("4", "Along X",   4, 1),
+    ("4", "Grid 2×2",  2, 2),
 ]
+COPY_OPTIONS = list(dict.fromkeys(lbl for lbl, *_ in SEGMENT_COPY_LAYOUTS))
+
+
+def _copy_arrangements(copies_label):
+    """Arrangement choices for a copy count (empty for a single copy)."""
+    return [arr for lbl, arr, _, _ in SEGMENT_COPY_LAYOUTS if lbl == copies_label and arr]
 
 
 def _copy_layout_to_cols_rows(copies_label, arrangement):
@@ -236,6 +244,7 @@ def _build_3d_figure(seg_params: list[dict]) -> go.Figure:
 def _seed_segments(segments: list[dict]) -> None:
     """Reset the Enclosure Geometry segment builder to a given list of segment dicts (SI)."""
     old_len = len(st.session_state.get("eb_seg_types", []))
+    unit_factor = UNIT_TO_M[st.session_state.get("eb_unit", "m")]  # editor shows the current unit
     st.session_state.eb_seg_types = [s["type"] for s in segments]
     for i, seg in enumerate(segments):
         st.session_state[f"eb_type_sel_{i}"] = SHAPES[seg["type"]]
@@ -248,7 +257,7 @@ def _seed_segments(segments: list[dict]) -> None:
             st.session_state.pop(f"eb_arrange_{i}", None)
         for k, v in seg.items():
             if k not in ("type", "cols", "rows"):
-                st.session_state[f"eb_{k}_{i}"] = float(v)
+                st.session_state[f"eb_{k}_{i}"] = float(v) / unit_factor
     for i in range(len(segments), old_len):
         for suffix in ("a", "b", "h", "r", "R", "A", "B", "type_sel", "copies", "arrange"):
             st.session_state.pop(f"eb_{suffix}_{i}", None)
@@ -297,6 +306,8 @@ with st.sidebar:
                 if _geo["mode"] == "Donaldson" and _geo.get("donaldson_family") and _geo.get("donaldson_model"):
                     st.session_state["eg_family"] = _geo["donaldson_family"]
                     st.session_state["eg_model"]  = _geo["donaldson_model"]
+                    if _geo.get("donaldson_hopper"):
+                        st.session_state["eg_hopper"] = _geo["donaldson_hopper"]
                 _seed_segments(_geo["segments"])
             st.rerun()
         except Exception:
@@ -436,7 +447,7 @@ geom_mode = st.selectbox(
 
 _reseed = geom_mode != _prev_geom_mode
 
-donaldson_family, donaldson_model = None, None
+donaldson_family, donaldson_model, donaldson_hopper = None, None, None
 
 if geom_mode == "Donaldson":
     families = list_families()
@@ -457,11 +468,23 @@ if geom_mode == "Donaldson":
     if donaldson_model != _prev_model:
         _reseed = True
 
+    # Hopper options depend on the model's width; fall back to the first
+    # option when the previous hopper isn't offered for this model.
+    hoppers = list_hoppers(donaldson_family, donaldson_model)
+    _prev_hopper = st.session_state.get("eg_hopper")
+    donaldson_hopper = st.selectbox(
+        "Hopper", hoppers,
+        index=hoppers.index(_prev_hopper) if _prev_hopper in hoppers else 0,
+    )
+    if donaldson_hopper != _prev_hopper:
+        _reseed = True
+
     st.session_state["eg_family"] = donaldson_family
     st.session_state["eg_model"]  = donaldson_model
+    st.session_state["eg_hopper"] = donaldson_hopper
 
     if _reseed:
-        _seed_segments(get_model(donaldson_family, donaldson_model).segments)
+        _seed_segments(get_segments(donaldson_family, donaldson_model, donaldson_hopper))
 
 elif geom_mode == "Circular Enclosure" and _reseed:
     _seed_segments(circular_enclosure_default())
@@ -501,6 +524,10 @@ else:
         for k, v in list(st.session_state.items()):
             if isinstance(v, float) and any(k.startswith(p) for p in _DIM_PREFIXES):
                 st.session_state[k] = v * ratio
+            elif k.startswith(("eb_copies_", "eb_arrange_", "eb_type_sel_")):
+                # st.rerun() below runs before these widgets render, and Streamlit
+                # drops widget state that isn't rendered or written in a run.
+                st.session_state[k] = v
         st.session_state["eb_unit"] = unit
         st.rerun()
 
@@ -574,20 +601,22 @@ else:
                 params.update(A=A * factor, B=B * factor, a=a * factor, b=b * factor, h=h * factor)
 
             cc1, cc2 = st.columns([1, 2])
-            copy_opts = ["1", "2", "4"]
             copies_label = cc1.selectbox(
-                "Side-by-side copies", copy_opts,
-                index=copy_opts.index(st.session_state.get(f"eb_copies_{i}", "1")),
+                "Side-by-side copies", COPY_OPTIONS,
+                index=COPY_OPTIONS.index(st.session_state.get(f"eb_copies_{i}", "1")),
                 key=f"eb_copies_{i}",
                 help="Identical copies of this segment arranged side by side "
                      "(e.g. multiple hoppers under one shared body).",
             )
             arrangement = None
-            if copies_label == "2":
-                arrange_opts = ["Along X", "Along Y"]
+            arrange_opts = _copy_arrangements(copies_label)
+            if len(arrange_opts) == 1:
+                arrangement = arrange_opts[0]
+            elif arrange_opts:
+                if st.session_state.get(f"eb_arrange_{i}") not in arrange_opts:
+                    st.session_state[f"eb_arrange_{i}"] = arrange_opts[0]
                 arrangement = cc2.radio(
                     "Arrangement", arrange_opts,
-                    index=arrange_opts.index(st.session_state.get(f"eb_arrange_{i}", "Along X")),
                     key=f"eb_arrange_{i}", horizontal=True,
                 )
             cols_n, rows_n = _copy_layout_to_cols_rows(copies_label, arrangement)
@@ -671,6 +700,7 @@ else:
             "V": V_si, "L": L_si, "Dhe": Dhe_si, "LD": ld_final,
             "cross_section_family": family,
             "donaldson_family": donaldson_family, "donaldson_model": donaldson_model,
+            "donaldson_hopper": donaldson_hopper,
         }
 
 st.markdown("---")
@@ -814,7 +844,7 @@ with r2_right:
             lc, ic = st.columns([1, 1], gap="small")
             _label(lc, "Diameter Dh [m]")
             Dh = ic.number_input("Diameter Dh [m]", label_visibility="collapsed",
-                                 value=float(dct.get("Dh", 0.6)), min_value=0.05, step=0.05, format="%.3f")
+                                 value=float(dct.get("Dh", 0.6)), min_value=0.05, step=0.01, format="%.3f")
 
             lc, ic = st.columns([1, 1], gap="small")
             _label(lc, "Kinlet [—]", tip_img="nfpa68_2023_figure_A85a.jpg")
@@ -824,12 +854,12 @@ with r2_right:
             lc, ic = st.columns([1, 1], gap="small")
             _label(lc, "Kelbows [—]", tip_img="nfpa68_2023_figure_A85b_c.jpg")
             Kelbows = ic.number_input("Kelbows [—]", label_visibility="collapsed",
-                                      value=float(dct.get("Kelbows", 0.0)), min_value=0.0, step=0.1, format="%.1f")
+                                      value=float(dct.get("Kelbows", 0.0)), min_value=0.0, step=0.01, format="%.2f")
 
             lc, ic = st.columns([1, 1], gap="small")
             _label(lc, "Koutlet [—]", tip_img="nfpa68_2023_figure_A85d.jpg")
             Koutlet = ic.number_input("Koutlet [—]", label_visibility="collapsed",
-                                      value=float(dct.get("Koutlet", 0.0)), min_value=0.0, step=0.1, format="%.2f")
+                                      value=float(dct.get("Koutlet", 0.0)), min_value=0.0, step=0.01, format="%.2f")
 
             duct_obj = Duct(Lduct=Lduct, Dh=Dh, Kinlet=Kinlet, Kelbows=Kelbows, Koutlet=Koutlet)
             st.caption(f"Computed: fD = {duct_obj.fD:.4f} · **K = {duct_obj.K:.3f}** (Eq. 8.5.1d)")
