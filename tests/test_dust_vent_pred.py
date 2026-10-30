@@ -42,3 +42,17 @@ def test_pred_above_max_flagged(at):
     _sb(at, "Enclosure geometry method").set_value("Donaldson").run()
     at.number_input(key="in_Pred").set_value(0.50).run()
     assert any("exceeded" in c.value for c in at.caption)
+
+
+def test_donaldson_sets_dust_collector_and_flexible_filters(at):
+    enc = _sb(at, "Enclosure type")
+    assert enc.value == "Standard enclosure"
+    _sb(at, "Enclosure geometry method").set_value("Donaldson").run()
+    assert _sb(at, "Enclosure type").value.startswith("Dust collector")
+    assert at.checkbox(key="in_flex_filters").value is True
+    # The user's choice is kept when only the model changes.
+    at.checkbox(key="in_flex_filters").uncheck().run()
+    _sb(at, "Model").set_value("DLMC 4/8/15").run()
+    assert at.checkbox(key="in_flex_filters").value is False
+    assert _sb(at, "Enclosure type").value.startswith("Dust collector")
+    assert not at.exception
