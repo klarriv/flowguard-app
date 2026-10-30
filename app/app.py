@@ -39,8 +39,3 @@ with left:
     render_ductulator()
 with right:
     render_converters()
-
-st.markdown("---")
-st.markdown("#### Available calculations")
-st.markdown("Select a calculation from the sidebar to begin.")
-st.page_link("pages/1_Dust_Vent_NFPA68.py", label="💨 Dust Deflagration Vent Sizing — NFPA 68 (2023) Ch.8")

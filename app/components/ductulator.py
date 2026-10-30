@@ -47,7 +47,7 @@ _SYSTEMS = {
 }
 _QTYS = ("flow", "diameter", "velocity")
 _QUANTITY_NAMES = {"flow": "Flow", "diameter": "Duct ID", "velocity": "Velocity"}
-_SOLVE_FOR = {"Velocity": "velocity", "Duct ID": "diameter", "Flow": "flow"}
+_SOLVE_FOR = {"Flow": "flow", "Duct ID": "diameter", "Velocity": "velocity"}
 _SHORT = {"flow": "q", "diameter": "d", "velocity": "v"}
 _BASE_KEY = {"flow": "m3s", "diameter": "m", "velocity": "ms"}  # SI units the library uses
 
