@@ -28,6 +28,7 @@ with st.sidebar:
     st.markdown("### Calculations")
     st.page_link("app.py", label="Home")
     st.page_link("pages/1_Dust_Vent_NFPA68.py", label="💨 Dust Vent — NFPA 68 Ch.8")
+    st.page_link("pages/2_Cyclone_Muschelknautz.py", label="🌪️ Cyclone — Muschelknautz")
     st.markdown("---")
     st.caption("NFPA 68 (2023) · Internal use only")
 
