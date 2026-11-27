@@ -145,7 +145,7 @@ if result is not None:
     r = st.columns(4)
     r[0].markdown(f"**Inlet velocity** {result.v_in:.2f} m/s")
     r[1].markdown(f"**Classification efficiency** {100 * result.eta_classification:.2f} %")
-    r[2].markdown(f"**Loading** {result.co:.4f} kg/m³ vs limit {result.co_L:.4f} kg/m³"
+    r[2].markdown(f"**Loading** {result.co:.4f} kg/kg vs limit {result.co_L:.4f} kg/kg"
                   + (" · :orange[saltation]" if result.saltation else ""))
     r[3].markdown(f"**Δp total** {result.dp_total:.0f} Pa · {dp_in(result.dp_total):.2f} inWg")
     st.caption(
@@ -156,8 +156,10 @@ if result is not None:
         + ("converged" if result.converged else ":orange[NOT converged]"))
     for w in result.warnings:
         st.warning(w)
+    # The library repeats "Warning…" PSD notes in warnings; show each once.
     for n in result.psd_notes:
-        st.info(n)
+        if n not in result.warnings:
+            st.info(n)
 
     # ── 5. Efficiency chart ───────────────────────────────────────────────────
     st.header("5. Efficiency Chart")
