@@ -20,9 +20,15 @@ from core.units import convert_pressure, mm_to_m
 from fluid_systems.duct_flow import solve_round_duct
 
 from components.cyclone_chart import build_figure, emission_by_band
+from utils.cyclone_format import efficiency_pct, sci
 from utils.cyclone_psd import (
     COLUMNS, EXAMPLES, EXAMPLE_PAN_PCT, MODE_CUM, MODE_SIEVE, MODES, build_psd,
 )
+
+HELP_CLASSIFICATION = ("Inner-vortex classification of the fraction not removed by "
+                       "mass loading (H&S Eq. 6.3.3).")
+HELP_OVERALL = ("Mass-loading (saltation) separation plus classification of the rest "
+                "(H&S Eq. 6.5.1).")
 
 st.set_page_config(
     page_title="Cyclone — Muschelknautz",
@@ -139,12 +145,14 @@ if result is not None:
     r = st.columns(4)
     r[0].markdown(f"**Cut size x50** {result.x50_um:.2f} µm · "
                   f"{'Stokes' if result.stokes_regime else 'non-Stokes'}")
-    r[1].markdown(f"**Overall efficiency** {100 * result.eta_overall:.2f} %")
-    r[2].markdown(f"**Penetration** {100 * result.penetration:.3f} %")
+    r[1].markdown(f"**Overall efficiency** {efficiency_pct(result.eta_overall)}",
+                  help=HELP_OVERALL)
+    r[2].markdown(f"**Penetration** {sci(result.penetration)}")
     r[3].markdown(f"**Emission** {result.emission_kg_h:.4f} kg/h · {result.emission_mg_m3:.1f} mg/m³")
     r = st.columns(4)
     r[0].markdown(f"**Inlet velocity** {result.v_in:.2f} m/s")
-    r[1].markdown(f"**Classification efficiency** {100 * result.eta_classification:.2f} %")
+    r[1].markdown(f"**Classification efficiency** {efficiency_pct(result.eta_classification)}",
+                  help=HELP_CLASSIFICATION)
     r[2].markdown(f"**Loading** {result.co:.4f} kg/kg vs limit {result.co_L:.4f} kg/kg"
                   + (" · :orange[saltation]" if result.saltation else ""))
     r[3].markdown(f"**Δp total** {result.dp_total:.0f} Pa · {dp_in(result.dp_total):.2f} inWg")
@@ -154,6 +162,22 @@ if result is not None:
         f"acceleration {result.dp_acc:.0f} Pa ({dp_in(result.dp_acc):.2f} inWg) · "
         f"iterations {result.iterations}, "
         + ("converged" if result.converged else ":orange[NOT converged]"))
+    # Mass split of H&S Eq. 6.5.1 / Fig. 6.5.1 (p. 123). CycloneResult has no
+    # field for the split fraction coL/co, so it is shown symbolically with the
+    # library's co and coL rather than computed here.
+    if result.saltation:
+        st.caption(
+            "Mass split (H&S Eq. 6.5.1, Fig. 6.5.1, p. 123) — "
+            "separated by mass loading (saltation): 1 − coL/co of feed · "
+            f"carried to the inner vortex: coL/co of feed (coL = {result.co_L:.4g} kg/kg, "
+            f"co = {result.co:.4g} kg/kg) · "
+            "classification efficiency on that fraction (Σ ηi·ΔMFi): "
+            f"{efficiency_pct(result.eta_classification)} · "
+            "overall = (1 − coL/co) + (coL/co)·η_class = "
+            f"{efficiency_pct(result.eta_overall)}")
+    else:
+        st.caption("No saltation (co ≤ coL): the whole feed goes to the inner vortex, "
+                   "so overall efficiency = classification efficiency.")
     for w in result.warnings:
         st.warning(w)
     # The library repeats "Warning…" PSD notes in warnings; show each once.

@@ -113,6 +113,45 @@ def test_case_file_results(case):
     assert "kg/m³ vs limit" not in texts
 
 
+_SUP = str.maketrans("⁻⁰¹²³⁴⁵⁶⁷⁸⁹", "-0123456789")
+
+
+def _value_after(texts, label):
+    """Text after ``**label** `` in the first markdown that has it."""
+    md = next(t for t in texts if t.startswith(f"**{label}** "))
+    return md[len(f"**{label}** "):]
+
+
+def test_case_file_overall_efficiency_and_penetration(case):
+    texts = _texts(case)
+    overall = _value_after(texts, "Overall efficiency")
+    assert not overall.startswith("100"), overall
+    assert overall == "99.9959 %"
+    # penetration (scientific notation) × inlet loading reproduces the emission
+    mant, exp = _value_after(texts, "Penetration").split(" × 10")
+    penetration = float(mant) * 10 ** int(exp.translate(_SUP))
+    emission = _value_after(texts, "Emission")
+    mg_m3 = float(emission.split(" · ")[1].removesuffix(" mg/m³"))
+    loading_kg_m3 = CASE_INPUTS["cy_co"]
+    assert math.isclose(penetration * loading_kg_m3 * 1e6, mg_m3, rel_tol=2e-3)
+    # Eq. 6.5.1 mass split is shown, with the tooltips on both efficiencies
+    split = next(t for t in texts if t.startswith("Mass split"))
+    assert "1 − coL/co" in split and "99.9959 %" in split and "98.41 %" in split
+    helps = {m.value.split("**")[1]: m.help for m in case.markdown if m.help}
+    assert "Eq. 6.5.1" in helps["Overall efficiency"]
+    assert "Eq. 6.3.3" in helps["Classification efficiency"]
+
+
+def test_no_saltation_hides_split(at):
+    # defaults, monodisperse 1 µm feed: co 0.00375 < coL 0.0091 kg/kg
+    at.checkbox(key="cy_median_only").set_value(True).run()
+    at.number_input(key="cy_xmed").set_value(1.0).run()
+    assert not at.exception and not at.error
+    texts = _texts(at)
+    assert not any(t.startswith("Mass split") for t in texts)
+    assert any("overall efficiency = classification efficiency" in t for t in texts)
+
+
 def test_case_file_each_warning_and_note_shown_once(case):
     shown = [w.value for w in case.warning] + [i.value for i in case.info]
     assert any("below the measured range" in s for s in shown)
