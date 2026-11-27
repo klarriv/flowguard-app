@@ -9,6 +9,8 @@ AppTest = pytest.importorskip("streamlit.testing.v1").AppTest
 
 from pathlib import Path
 
+from components.cyclone_chart import NAME_SHARE
+
 HOME = str(Path(__file__).resolve().parent.parent / "app" / "app.py")
 PAGE = "pages/2_Cyclone_Muschelknautz.py"
 
@@ -125,6 +127,8 @@ def test_case_file_chart_range_and_emission_panel(case):
     # 1-99 % of the S-curve plus the sieve range, padded x/1.3: about 4 to 1550 µm
     assert math.isclose(10 ** lo, 4.25, rel_tol=0.01)
     assert math.isclose(10 ** hi, 1190 * 1.3, rel_tol=0.01)
-    share = [t for t in spec["data"] if t.get("name") == "Share of emission"]
-    assert len(share) == 1
-    assert math.isclose(sum(share[0]["y"]), 100.0, rel_tol=1e-9)
+    # one filled rectangle per emitting interval, heights summing to 100 %
+    share = [t for t in spec["data"] if t.get("name") == NAME_SHARE]
+    assert len(share) == 11  # every interval of the case PSD emits something
+    assert math.isclose(sum(max(t["y"]) for t in share), 100.0, rel_tol=1e-9)
+    assert sum(1 for t in share if t.get("showlegend") is not False) == 1
