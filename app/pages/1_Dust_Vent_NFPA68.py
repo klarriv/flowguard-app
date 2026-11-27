@@ -14,6 +14,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from core.geometry import segment_volume, enclosure_volume_and_length
+from core.units import ft_to_m, in_to_m
 from explosion_protection.nfpa_68_ch6_orchestrator import (
     enclosure_hydraulic_diameter, largest_cross_section,
 )
@@ -39,9 +40,9 @@ from utils.serializer import inputs_to_dict, result_to_dict, build_run_payload
 ENCLOSURE_TYPES = ["Standard enclosure", "Dust collector (§8.7)"]
 
 # ── Enclosure Geometry — unit conversion (display-only; math lives in flowguard) ─
-UNIT_TO_M     = {"m": 1.0,   "ft": 0.3048, "in": 0.0254}
+UNIT_TO_M     = {"m": 1.0,   "ft": ft_to_m(1.0), "in": in_to_m(1.0)}
 UNIT_STEP     = {"m": 0.05,  "ft": 0.1,    "in": 0.5}
-UNIT_MIN_POS  = {"m": 0.001, "ft": 0.003,  "in": 0.04}
+UNIT_MIN_POS  = {k: 0.001 / f for k, f in UNIT_TO_M.items()}  # 1 mm in each unit
 _DIM_PREFIXES = ("eb_a_", "eb_b_", "eb_h_", "eb_r_", "eb_R_", "eb_A_", "eb_B_")
 
 _SEG_COLORS = [
